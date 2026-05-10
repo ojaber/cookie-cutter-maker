@@ -4,9 +4,12 @@ image_extractor.py
 Classifies an input image and extracts a binary foreground mask using the
 best available strategy — no cloud services required.
 
-Three paths:
+Four paths:
   "binary"     – image is already a line-art / threshold-able outline.
                  Use simple luminance threshold (existing behaviour).
+  "dashed"     – outline drawn as dashed/dotted strokes. Bridge the gaps
+                 with morphological dilation, fill the enclosed interior,
+                 then erode back to recover the silhouette.
   "simple_bg"  – image has a roughly uniform background (e.g. product shot
                  on white, logo on solid colour). Use LAB colour-distance
                  from sampled corners.
@@ -27,6 +30,7 @@ from typing import Literal
 
 import numpy as np
 from PIL import Image
+from scipy.ndimage import binary_dilation, binary_erosion, binary_fill_holes
 from skimage import measure, morphology
 from skimage.color import rgb2lab
 from skimage.segmentation import felzenszwalb
@@ -51,7 +55,7 @@ if REMBG_ENABLED:
     except Exception as _e:
         logger.warning("rembg session initialisation failed: %s", _e)
 
-ImageMode = Literal["binary", "simple_bg", "complex"]
+ImageMode = Literal["binary", "dashed", "simple_bg", "complex"]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Classification
@@ -72,6 +76,17 @@ def classify_image(img: Image.Image) -> ImageMode:
     mid_pct  = 1.0 - low_pct - high_pct   # mid-tones
 
     if mid_pct < 0.12:
+        # A near-binary image *could* still be a dashed/dotted outline rather
+        # than a solid silhouette or single closed line. Detect that here so
+        # the extractor can bridge the gaps before tracing.
+        if _looks_dashed(gray):
+            logger.info(
+                "Image classified as DASHED OUTLINE — %.1f%% mid-tone pixels "
+                "and foreground breaks into many small components. "
+                "Using dilate-fill-erode extraction.",
+                mid_pct * 100,
+            )
+            return "dashed"
         logger.info(
             "Image classified as BINARY OUTLINE — %.1f%% mid-tone pixels "
             "(threshold: <12%%). Using luminance threshold extraction.",
@@ -118,6 +133,84 @@ def classify_image(img: Image.Image) -> ImageMode:
 def extract_mask_binary(gray: np.ndarray, threshold: int = 200) -> np.ndarray:
     """Existing behaviour: simple luminance threshold."""
     return gray < threshold
+
+
+def _looks_dashed(gray: np.ndarray, threshold: int = 200) -> bool:
+    """
+    Decide whether a near-binary image is a dashed/dotted outline rather
+    than a solid silhouette or single closed-line outline.
+
+    Heuristic: threshold the image and look at connected components of the
+    dark foreground. A solid silhouette or a single closed-line outline
+    has 1-2 dominant components; a dashed line breaks into many small
+    pieces with no single dominant blob.
+    """
+    fg = gray < threshold
+    if not fg.any():
+        return False
+    labels = measure.label(fg)
+    n = int(labels.max())
+    if n < 8:
+        return False
+    region_areas = np.bincount(labels.ravel())[1:]  # drop background
+    largest = int(region_areas.max())
+    total = int(region_areas.sum())
+    return largest / total < 0.5
+
+
+def extract_mask_dashed(
+    gray: np.ndarray,
+    threshold: int = 200,
+    bridge_radius: int | None = None,
+) -> np.ndarray:
+    """
+    Foreground extraction for outlines drawn as dashed or dotted strokes.
+
+    1.  Threshold to recover the dark dashes.
+    2.  Dilate the dashes just enough to merge them into a closed loop.
+    3.  Flood-fill the now-enclosed interior.
+    4.  Erode by the same radius to recover the original silhouette.
+    5.  Clean up small specks and tiny holes.
+
+    When *bridge_radius* is None, the smallest radius that successfully
+    closes the loop is used — this preserves fine detail (small bumps,
+    petals, scallops) that a larger radius would smooth away.
+    """
+    h, w = gray.shape
+    raw = gray < threshold
+
+    if bridge_radius is not None:
+        radii = [bridge_radius]
+    else:
+        max_r = max(12, int(round(min(h, w) * 0.05)))
+        radii = list(range(2, max_r + 1, 2))
+
+    chosen_r: int | None = None
+    closed: np.ndarray | None = None
+    for r in radii:
+        struct = morphology.disk(r)
+        dilated = binary_dilation(raw, structure=struct)
+        filled = binary_fill_holes(dilated)
+        # gain > 1.5 means fill_holes enclosed an interior — the dashes
+        # now form a closed loop after dilation.
+        if filled is not None and filled.sum() > dilated.sum() * 1.5:
+            chosen_r = r
+            closed = filled
+            break
+
+    if closed is None or chosen_r is None:
+        return np.zeros_like(raw, dtype=bool)
+
+    logger.info("Dashed extraction bridged at radius=%d.", chosen_r)
+    mask = binary_erosion(closed, structure=morphology.disk(chosen_r))
+
+    if not mask.any():
+        return mask
+
+    min_area = max(200, (h * w) // 200)
+    mask = morphology.remove_small_objects(mask, max_size=min_area)
+    mask = morphology.remove_small_holes(mask, max_size=min_area * 4)
+    return mask
 
 
 def extract_mask_simple_bg(
@@ -280,6 +373,15 @@ def extract_foreground_mask(
     if mode == "binary":
         logger.info("Running extraction: BINARY threshold (luminance < %d).", threshold)
         mask = extract_mask_binary(gray, threshold=threshold)
+    elif mode == "dashed":
+        logger.info("Running extraction: DASHED outline (dilate-fill-erode, threshold=%d).", threshold)
+        mask = extract_mask_dashed(gray, threshold=threshold)
+        if not mask.any():
+            raise ValueError(
+                "Dashed outline detected but the gaps between dashes are too "
+                "wide to bridge automatically. Try a higher-resolution scan, "
+                "or fill the dashes in with a solid line."
+            )
     elif mode == "simple_bg":
         logger.info("Running extraction: UNIFORM BACKGROUND colour-distance (ΔE threshold=%.1f).", delta_e_threshold)
         mask = extract_mask_simple_bg(rgb, delta_e_threshold=delta_e_threshold)

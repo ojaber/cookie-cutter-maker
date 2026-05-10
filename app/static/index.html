@@ -462,6 +462,7 @@
   function setStatus(msg) { $('status').textContent = msg; }
   const MODE_LABELS = {
     binary:    { label: 'outline',    title: 'Pre-drawn outline — classic threshold path' },
+    dashed:    { label: 'dashed',     title: 'Dashed/dotted outline — gaps bridged automatically' },
     simple_bg: { label: 'photo · bg', title: 'Uniform background detected — colour-distance extraction' },
     complex:   { label: 'photo · ai', title: 'Complex background — rembg (local) or graph-cut fallback' },
   };

@@ -37,7 +37,7 @@ def trace_png_to_polygon(
     threshold: int = 200,
     simplify_epsilon: float = 0.002,
     smooth_radius: float = 0.0,
-    extraction_mode: Literal["auto", "binary", "simple_bg", "complex"] = "auto",
+    extraction_mode: Literal["auto", "binary", "dashed", "simple_bg", "complex"] = "auto",
     delta_e_threshold: float = 28.0,
 ) -> TraceResult:
     """
@@ -80,9 +80,15 @@ def trace_png_to_polygon(
     h, w = arr.shape
 
     pts = np.array(contour)
+    # Flip Y to convert image (Y-down) to cartesian (Y-up), and flip X so the
+    # printed cutter's cutting face matches the orientation of the source
+    # image — without this mirror, STLs come out left/right reversed in slicers.
+    # Normalise both axes by the SAME factor so non-square images keep their
+    # aspect ratio (otherwise a wide image would be squashed horizontally).
     y = h - pts[:, 0]
-    x = pts[:, 1]
-    pts_xy = np.column_stack([x / w, y / h])
+    x = w - pts[:, 1]
+    norm = float(max(w, h))
+    pts_xy = np.column_stack([x / norm, y / norm])
 
     line = LineString(pts_xy)
     simple = line.simplify(simplify_epsilon, preserve_topology=True)
