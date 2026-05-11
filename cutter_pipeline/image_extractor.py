@@ -30,7 +30,7 @@ from typing import Literal
 
 import numpy as np
 from PIL import Image
-from scipy.ndimage import binary_dilation, binary_erosion, binary_fill_holes
+from scipy.ndimage import binary_dilation, binary_erosion, binary_fill_holes, gaussian_filter
 from skimage import measure, morphology
 from skimage.color import rgb2lab
 from skimage.segmentation import felzenszwalb
@@ -183,7 +183,7 @@ def extract_mask_dashed(
         radii = [bridge_radius]
     else:
         max_r = max(12, int(round(min(h, w) * 0.05)))
-        radii = list(range(2, max_r + 1, 2))
+        radii = list(range(2, max_r + 1))
 
     chosen_r: int | None = None
     closed: np.ndarray | None = None
@@ -382,6 +382,11 @@ def extract_foreground_mask(
                 "wide to bridge automatically. Try a higher-resolution scan, "
                 "or fill the dashes in with a solid line."
             )
+        # Soften the pixel-scale jaggies left by binary erosion so the
+        # downstream find_contours produces a smooth curve. The 0.5
+        # iso-level intersects the blurred boundary halfway, so the
+        # silhouette size is preserved.
+        return gaussian_filter(mask.astype(float), sigma=1.5), mode, warning
     elif mode == "simple_bg":
         logger.info("Running extraction: UNIFORM BACKGROUND colour-distance (ΔE threshold=%.1f).", delta_e_threshold)
         mask = extract_mask_simple_bg(rgb, delta_e_threshold=delta_e_threshold)
