@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import sys
 import uuid
@@ -25,6 +26,10 @@ from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTEN
 import anyio
 
 from PIL import Image as _PILImage
+# Cap pixel count to defuse decompression bombs before PIL allocates a giant array.
+# Default PIL limit is ~89 MP — tighten to ~25 MP (≈5000×5000), which is more than
+# enough for a cookie-cutter outline.
+_PILImage.MAX_IMAGE_PIXELS = 25_000_000
 from cutter_pipeline.trace_outline import trace_png_to_polygon
 from cutter_pipeline.stl_cutter import polygon_to_cookie_cutter_stl
 from shapely.geometry import shape, mapping
@@ -124,6 +129,87 @@ app = FastAPI(title="Cookie Cutter Maker", version="0.2.0")
 OUTPUT_DIR = Path(os.environ.get("PIPELINE_OUTPUT_DIR", "output")).resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Reject uploads larger than this to avoid disk/memory exhaustion.
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
+
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _safe_name(name: str) -> str:
+    """Validate a user-supplied base filename used to build output paths."""
+    name = (name or "").strip()
+    if not _SAFE_NAME_RE.match(name) or ".." in name:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid name: use letters, digits, '.', '_' or '-' only (max 64 chars).",
+        )
+    return name
+
+
+def _safe_job_id(job_id: str) -> str:
+    """Validate that a job_id matches the 32-char hex format produced by _new_job_dir."""
+    job_id = (job_id or "").strip().lower()
+    if not _JOB_ID_RE.match(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job_id.")
+    return job_id
+
+
+def _safe_filename(filename: str) -> str:
+    filename = (filename or "").strip()
+    if not _SAFE_FILENAME_RE.match(filename) or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+    return filename
+
+
+def _confined_path(job_id: str, *parts: str) -> Path:
+    """Build a path inside OUTPUT_DIR/<job_id> and verify it cannot escape."""
+    job_id = _safe_job_id(job_id)
+    candidate = (OUTPUT_DIR / job_id).resolve()
+    try:
+        candidate.relative_to(OUTPUT_DIR)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job_id.")
+    for part in parts:
+        candidate = candidate / part
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(OUTPUT_DIR)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path.")
+    return resolved
+
+
+async def _read_upload(file: UploadFile) -> bytes:
+    """Read an UploadFile into memory while enforcing MAX_UPLOAD_BYTES."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _verify_image_bytes(content: bytes) -> None:
+    """Confirm the upload is actually a decodable image before we run the pipeline on it."""
+    from io import BytesIO
+    try:
+        with _PILImage.open(BytesIO(content)) as img:
+            img.verify()
+    except _PILImage.DecompressionBombError:
+        raise HTTPException(status_code=400, detail="Image too large (decompression bomb guard).")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Uploaded file is not a valid image.")
+
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -160,10 +246,17 @@ async def _metrics_middleware(request: Request, call_next):
         raise
     finally:
         elapsed = time.perf_counter() - start
-        path = request.url.path
+        path = _metrics_path(request.url.path)
         method = request.method
         REQUEST_COUNT.labels(method=method, path=path, status=status_code).inc()
         REQUEST_LATENCY.labels(method=method, path=path, status=status_code).observe(elapsed)
+
+
+def _metrics_path(path: str) -> str:
+    """Collapse paths with per-job IDs so Prometheus label cardinality stays bounded."""
+    if path.startswith("/files/"):
+        return "/files/:job_id/:filename"
+    return path
 
 
 @app.get("/metrics")
@@ -309,14 +402,17 @@ async def trace_from_png(
     extraction_mode: str = Form("auto"),
     delta_e_threshold: float = Form(28.0),
 ):
-    if not file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
+    name = _safe_name(name)
+    if not (file.filename or "").lower().endswith((".png", ".jpg", ".jpeg")):
         raise HTTPException(status_code=400, detail="Upload a PNG/JPG outline image")
+
+    content = await _read_upload(file)
+    _verify_image_bytes(content)
 
     job_dir = _new_job_dir()
     png_path = job_dir / f"{name}.png"
     svg_path = job_dir / f"{name}.svg"
 
-    content = await file.read()
     png_path.write_bytes(content)
     _log_image_upload(file.filename, content, png_path)
     traced = trace_png_to_polygon(
@@ -359,15 +455,18 @@ async def pipeline_from_png(
     extraction_mode: str = Form("auto"),
     delta_e_threshold: float = Form(28.0),
 ):
-    if not file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
+    name = _safe_name(name)
+    if not (file.filename or "").lower().endswith((".png", ".jpg", ".jpeg")):
         raise HTTPException(status_code=400, detail="Upload a PNG/JPG outline image")
+
+    content = await _read_upload(file)
+    _verify_image_bytes(content)
 
     job_dir = _new_job_dir()
     png_path = job_dir / f"{name}.png"
     svg_path = job_dir / f"{name}.svg"
     stl_path = job_dir / f"{name}.stl"
 
-    content = await file.read()
     png_path.write_bytes(content)
     _log_image_upload(file.filename, content, png_path)
     traced = trace_png_to_polygon(
@@ -424,6 +523,7 @@ async def pipeline_from_prompt(
     min_component_area_mm2: float = Form(25.0),
     smooth_radius: float = Form(1.0),
 ):
+    name = _safe_name(name)
     if len(prompt) > 1000:
         raise HTTPException(status_code=400, detail="Prompt must be 1000 characters or fewer.")
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -494,6 +594,7 @@ async def outline_from_prompt(
     name: str = Form("cookie_cutter"),
     smooth_radius: float = Form(1.0),
 ):
+    name = _safe_name(name)
     if len(prompt) > 1000:
         raise HTTPException(status_code=400, detail="Prompt must be 1000 characters or fewer.")
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -548,7 +649,8 @@ async def trace_from_job(
     extraction_mode: str = Form("auto"),
     delta_e_threshold: float = Form(28.0),
 ):
-    job_dir = OUTPUT_DIR / job_id
+    name = _safe_name(name)
+    job_dir = _confined_path(job_id)
     if not job_dir.exists():
         raise HTTPException(status_code=404, detail="job_id not found")
 
@@ -590,7 +692,8 @@ async def stl_from_job(
     keep_holes: bool = Form(False),
     min_component_area_mm2: float = Form(25.0),
 ):
-    job_dir = OUTPUT_DIR / job_id
+    name = _safe_name(name)
+    job_dir = _confined_path(job_id)
     if not job_dir.exists():
         raise HTTPException(status_code=404, detail="job_id not found")
 
@@ -630,7 +733,8 @@ async def stl_from_job(
 
 @app.get("/files/{job_id}/{filename}")
 def get_file(job_id: str, filename: str):
-    path = OUTPUT_DIR / job_id / filename
-    if not path.exists():
+    filename = _safe_filename(filename)
+    path = _confined_path(job_id, filename)
+    if not path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path)
