@@ -181,9 +181,13 @@
             <td style="padding:6px 4px;color:#e6edf3;font-weight:700;">Illustrations &amp; logos</td>
             <td style="padding:6px 4px;color:#9fb0c2;">Subject on a solid or plain background. Uses colour-distance extraction.</td>
           </tr>
-          <tr>
+          <tr style="border-bottom:1px solid #1f2a37;">
             <td style="padding:6px 4px;color:#e6edf3;font-weight:700;">Photos</td>
             <td style="padding:6px 4px;color:#9fb0c2;">Any background. Uses local U2Net AI (no API key, runs offline).</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 4px;color:#e6edf3;font-weight:700;">Grid &amp; lattice</td>
+            <td style="padding:6px 4px;color:#9fb0c2;">Connected black grid lines with equal cells. Auto-detected or choose Grid mode.</td>
           </tr>
         </table>
         <p style="margin:10px 0 0 0;color:#9fb0c2;">Keep shapes simple and avoid thin lines for best print results.</p>
@@ -194,6 +198,14 @@
   <div class="card step-grid">
     <div>
       <h2>Step 2: Trace tuning (SVG)</h2>
+      <label>Shape mode <span class="tip" data-tip="Auto detects single silhouettes vs connected grid line art. Grids become divider walls with one outer grip flange.">?</span></label>
+      <select id="topology" style="width:100%;background:#0b0f14;border:1px solid #243244;color:#e6edf3;border-radius:12px;padding:12px;box-sizing:border-box;">
+        <option value="auto" selected>Auto — detect single shape vs grid</option>
+        <option value="single">Single shape — one outline ring cutter</option>
+        <option value="lattice">Grid / lattice — connected divider grid</option>
+      </select>
+      <div id="gridHint" class="small" style="margin-top:8px;color:#fcd34d;display:none;"></div>
+      <div id="topologyBadge" style="margin-top:8px;display:none;"></div>
       <div class="row stack">
         <div>
           <label>Threshold: <span id="thrVal">200</span> <span class="tip" data-tip="Black/white cutoff for tracing; lower = more pixels counted as ink.">?</span></label>
@@ -211,7 +223,7 @@
       <button id="btnTrace" class="secondary" type="button">Trace</button>
     </div>
     <div class="pane media">
-      <header>Traced SVG</header>
+      <header>Traced preview</header>
       <div class="content">
         <div id="svgPreview" class="small">Run step 1, then step 2 to preview.</div>
       </div>
@@ -222,6 +234,7 @@
         <ul>
           <li>If tracing is jagged, increase <b>Simplify</b>.</li>
           <li><b>Threshold</b> applies only to outline/binary images. For photos it is ignored.</li>
+          <li><b>Grid / lattice</b> mode turns connected cell lines into divider walls.</li>
           <li>Re-run this step as much as you need; no new prompt tokens.</li>
         </ul>
       </div>
@@ -234,8 +247,9 @@
 
       <div class="row">
         <div>
-          <label>Width (mm): <span id="widthVal">95</span> <span class="tip" data-tip="Overall cutter width across its widest point.">?</span></label>
+          <label><span id="widthLabel">Width (mm)</span>: <span id="widthVal">95</span> <span id="widthTip" class="tip" data-tip="Overall cutter width across its widest point.">?</span></label>
           <input id="width" type="range" min="40" max="200" value="95" step="1"/>
+          <div id="gridHeightNote" class="small" style="margin-top:4px;display:none;color:#9fb0c2;"></div>
         </div>
         <div>
           <label>Wall (mm): <span id="wallVal">1.0</span> <span class="tip" data-tip="Thickness of the cutting wall. Increase to strengthen thin shapes.">?</span></label>
@@ -258,21 +272,23 @@
       <input id="flangeOut" type="range" min="0" max="12" value="5" step="0.5"/>
 
       <div class="row">
-        <div>
+        <div id="cleanupGroup">
           <label>Cleanup (mm): <span id="cleanupVal">0.5</span> <span class="tip" data-tip="Morphological smoothing to remove tiny zig-zags or noise before offsetting.">?</span></label>
           <input id="cleanup" type="range" min="0" max="2" value="0.5" step="0.1"/>
         </div>
-        <div>
+        <div id="tipSmoothGroup">
           <label>Tip smoothing (mm): <span id="tipSmoothVal">0.6</span> <span class="tip" data-tip="Rounds sharp corners so inner offsets don’t collapse to paper-thin walls.">?</span></label>
           <input id="tipSmooth" type="range" min="0" max="2" value="0.6" step="0.05"/>
         </div>
-        <div>
+        <div id="keepHolesGroup">
           <label>Keep holes <span class="tip" data-tip="Preserve interior holes instead of filling them before offsetting.">?</span></label>
           <input id="keepHoles" type="checkbox" />
         </div>
       </div>
-      <label>Min island area (mm²): <span id="areaVal">25</span> <span class="tip" data-tip="Discard tiny disconnected islands below this area to avoid fragile crumbs.">?</span></label>
-      <input id="area" type="range" min="1" max="200" value="25" step="1"/>
+      <div id="areaGroup">
+        <label>Min island area (mm²): <span id="areaVal">25</span> <span class="tip" data-tip="Discard tiny disconnected islands below this area to avoid fragile crumbs.">?</span></label>
+        <input id="area" type="range" min="1" max="200" value="25" step="1"/>
+      </div>
 
       <button id="btnRun" type="button">Generate STL</button>
       <div id="status" class="small" style="margin-top:10px;"></div>
@@ -467,6 +483,64 @@
     complex:   { label: 'photo · ai', title: 'Complex background — rembg (local) or graph-cut fallback' },
   };
 
+  function setLatticeUi(isLattice, cols, rows, heightMm) {
+    const singleOnly = ['cleanupGroup', 'tipSmoothGroup', 'keepHolesGroup', 'areaGroup'];
+    singleOnly.forEach(id => {
+      const el = $(id);
+      if (!el) return;
+      el.style.opacity = isLattice ? '0.45' : '1';
+      el.querySelectorAll('input').forEach(inp => { inp.disabled = isLattice; });
+    });
+    $('widthLabel').textContent = isLattice ? 'Grid width (mm)' : 'Width (mm)';
+    $('widthTip').setAttribute('data-tip', isLattice
+      ? 'Width of the full grid; height scales automatically to keep cell proportions.'
+      : 'Overall cutter width across its widest point.');
+    const note = $('gridHeightNote');
+    if (isLattice && heightMm) {
+      note.style.display = 'block';
+      note.textContent = `Height: ${heightMm.toFixed(1)} mm (auto)`;
+    } else if (isLattice && cols && rows) {
+      note.style.display = 'block';
+      note.textContent = `${cols}×${rows} grid — height scales with width.`;
+    } else {
+      note.style.display = 'none';
+      note.textContent = '';
+    }
+  }
+
+  function setTopologyBadge(data) {
+    const badge = $('topologyBadge');
+    if (!data || !data.topology) {
+      badge.style.display = 'none';
+      badge.innerHTML = '';
+      return;
+    }
+    const color = data.topology === 'lattice' ? '#7ee787' : '#93c5fd';
+    const label = data.topology === 'lattice' && data.cols && data.rows
+      ? `${data.cols}×${data.rows} grid`
+      : 'single shape';
+    badge.style.display = 'block';
+    badge.innerHTML = `<span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;background:#162235;border:1px solid #2b3b4f;color:${color};">${label}</span>`;
+  }
+
+  function setGridHint(msg) {
+    const el = $('gridHint');
+    if (!msg) {
+      el.style.display = 'none';
+      el.textContent = '';
+      return;
+    }
+    el.style.display = 'block';
+    el.textContent = `⚠ ${msg}`;
+  }
+
+  function applyTopologyResponse(data) {
+    const isLattice = data && data.topology === 'lattice';
+    setLatticeUi(isLattice, data?.cols, data?.rows, data?.height_mm);
+    setTopologyBadge(data);
+    setGridHint(data?.grid_hint || '');
+  }
+
   function setStepStatus(msg, type='info', extractionMode='', warning='') {
     const el = $('step1Status');
     if (!el) return;
@@ -544,6 +618,10 @@
     return data;
   }
 
+  function traceParams(fd) {
+    fd.append('topology', $('topology').value || 'auto');
+  }
+
   function stlParams(fd) {
     fd.append('name', $('name').value || 'cookie_cutter');
     fd.append('width_mm', $('width').value);
@@ -574,9 +652,11 @@
         fd.append('threshold', $('thr').value);
         fd.append('simplify', $('simp').value);
         fd.append('smooth_radius', $('smooth').value);
+        traceParams(fd);
         const data = await postForm('/trace/from-png', fd);
         setStatus('Outline loaded.');
         setStepStatus('Outline loaded.', 'success', data.extraction_mode, data.warning || '');
+        applyTopologyResponse(data);
         setLinks(data);
         if (data.svg) {
           $('svgPreview').innerHTML = `<iframe src="${data.svg}" aria-label="SVG preview"></iframe>`;
@@ -613,9 +693,11 @@
       fd.append('threshold', $('thr').value);
       fd.append('simplify', $('simp').value);
       fd.append('smooth_radius', $('smooth').value);
+      traceParams(fd);
       const data = await postForm('/trace/from-job', fd);
       setStatus('Trace updated.');
       setStepStatus('Trace updated.', 'success', data.extraction_mode, data.warning || '');
+      applyTopologyResponse(data);
       setLinks(data);
       updatePreviews(data);
     } catch (e) {
@@ -636,6 +718,7 @@
       stlParams(fd);
       const data = await postForm('/stl/from-job', fd);
       setStatus('Done! Download your files below.');
+      applyTopologyResponse(data);
       setLinks(data);
       updatePreviews(data);
     } catch (e) {

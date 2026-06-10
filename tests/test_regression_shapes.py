@@ -43,13 +43,11 @@ def _min_top_gap(mesh: trimesh.Trimesh, band_mm: float = 0.1) -> float:
 def test_shapes_top_gap(tmp_path: Path):
     for name, width in CASES:
         png = ASSETS / name
-        traced = trace_png_to_polygon(str(png), str(tmp_path / f"{name}.svg"))
+        traced = trace_png_to_polygon(str(png), str(tmp_path / f"{name}.svg"), topology="auto")
         out = tmp_path / f"{name}.stl"
-        polygon_to_cookie_cutter_stl(
-            traced.polygon,
-            str(out),
-            target_width_mm=width,
-        )
+        from cutter_pipeline.stl_dispatch import generate_stl_from_trace
+
+        generate_stl_from_trace(traced, str(out), target_width_mm=width)
         mesh = trimesh.load(out, force="mesh")
         gap = _min_top_gap(mesh)
         assert gap >= 0.3, f"{name}: top gap too small ({gap:.3f} mm)"

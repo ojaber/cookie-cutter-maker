@@ -42,6 +42,15 @@ MIT License © seaburr
 
 No OpenAI calls.
 
+### Grid / lattice outlines
+
+Connected grid line art (e.g. tic-tac-toe or brownie dividers) is supported via **Shape mode**:
+
+- **Auto** — detects a regular connected grid and builds divider walls with one outer grip flange.
+- **Grid / lattice** — force lattice mode for evenly spaced cell lines.
+
+Single silhouettes (heart, star, etc.) continue to use the classic ring cutter path.
+
 ## Prompt flow (optional)
 
 If you want prompt -> outline generation:
@@ -104,6 +113,7 @@ PNG input:
 
 ```bash
 python -m cutter_pipeline.cli --png examples/pajama_outline.png --outdir output --name pajama
+python -m cutter_pipeline.cli --png ~/Downloads/3-4.png --topology auto --outdir output --name grid
 ```
 
 ## Test / smoke test

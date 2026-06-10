@@ -28,6 +28,8 @@ def test_trace_png_to_polygon(tmp_path: Path) -> None:
     )
 
     # Basic validity checks
+    assert result.topology == "single"
+    assert result.polygon is not None
     assert result.polygon.is_valid
     # Expect area close to the drawn square (0.5*0.5 = 0.25 in normalized coords)
     assert 0.20 <= result.polygon.area <= 0.30

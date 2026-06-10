@@ -1,9 +1,9 @@
 # Next steps (recommended)
 
 ## 1) Improve outline validation
-- enforce exactly one external contour
-- reject holes / multiple blobs
-- add min/max area checks
+- lattice mode handles connected grid line art (auto-detected or forced)
+- single-shape mode still expects one primary silhouette
+- add min/max area checks for single-shape uploads
 
 ## 2) Better tracing controls
 Expose in UI/API:

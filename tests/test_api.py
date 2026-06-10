@@ -213,6 +213,7 @@ def test_trace_from_png_writes_files_inside_job_dir(client, tmp_path):
     assert (out_root / job_id / "outline.png").is_file()
     assert (out_root / job_id / "outline.svg").is_file()
     assert (out_root / job_id / "polygon.json").is_file()
+    assert (out_root / job_id / "trace_meta.json").is_file()
 
 
 def test_pipeline_from_png_produces_stl_and_zip(client):
@@ -233,6 +234,26 @@ def test_pipeline_from_png_produces_stl_and_zip(client):
     with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as zf:
         names = set(zf.namelist())
         assert {"cookie.png", "cookie.svg", "cookie.stl"} <= names
+
+
+def test_grid_png_pipeline_lattice_topology(client):
+    grid_png = Path(__file__).parent / "assets" / "grid_3x4.png"
+    if not grid_png.exists():
+        return
+    r = client.post(
+        "/pipeline/from-png",
+        data={"name": "grid", "topology": "auto", "width_mm": "95"},
+        files={"file": ("grid.png", grid_png.read_bytes(), "image/png")},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["topology"] == "lattice"
+    assert body["cols"] == 3
+    assert body["rows"] == 4
+    assert body.get("height_mm", 0) > 95
+    stl = client.get(body["stl"])
+    assert stl.status_code == 200
+    assert len(stl.content) > 100
 
 
 def test_pipeline_then_stl_from_job(client):

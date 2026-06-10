@@ -3,8 +3,8 @@ import os
 from dotenv import load_dotenv
 
 from cutter_pipeline.outline_openai import generate_outline_png
+from cutter_pipeline.stl_dispatch import generate_stl_from_trace
 from cutter_pipeline.trace_outline import trace_png_to_polygon
-from cutter_pipeline.stl_cutter import polygon_to_cookie_cutter_stl
 
 def main():
     load_dotenv()
@@ -14,6 +14,12 @@ def main():
     p.add_argument("--png", help="Existing outline PNG path (optional)")
     p.add_argument("--outdir", default="output")
     p.add_argument("--name", default="cookie_cutter")
+    p.add_argument(
+        "--topology",
+        choices=["auto", "single", "lattice"],
+        default="auto",
+        help="Shape topology: auto-detect, single outline, or connected grid lattice",
+    )
 
     p.add_argument("--width-mm", type=float, default=95.0)
     p.add_argument("--wall-mm", type=float, default=1.0, help="Base cutter wall thickness (minimum enforced: 0.45mm)")
@@ -52,11 +58,12 @@ def main():
         threshold=args.threshold,
         simplify_epsilon=args.simplify,
         smooth_radius=args.smooth_radius,
+        topology=args.topology,
     )
 
     stl_path = os.path.join(args.outdir, f"{args.name}.stl")
-    polygon_to_cookie_cutter_stl(
-        traced.polygon,
+    generate_stl_from_trace(
+        traced,
         stl_path,
         target_width_mm=args.width_mm,
         wall_mm=args.wall_mm,
@@ -74,6 +81,9 @@ def main():
     print(" PNG:", png_path)
     print(" SVG:", svg_path)
     print(" STL:", stl_path)
+    print(" Topology:", traced.topology)
+    if traced.topology == "lattice":
+        print(f" Grid: {traced.cols} cols x {traced.rows} rows")
 
 if __name__ == "__main__":
     main()

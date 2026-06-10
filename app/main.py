@@ -31,7 +31,8 @@ from PIL import Image as _PILImage
 # enough for a cookie-cutter outline.
 _PILImage.MAX_IMAGE_PIXELS = 25_000_000
 from cutter_pipeline.trace_outline import trace_png_to_polygon
-from cutter_pipeline.stl_cutter import polygon_to_cookie_cutter_stl
+from cutter_pipeline.stl_dispatch import generate_stl_from_trace
+from cutter_pipeline.trace_meta import load_trace_result, save_trace_result
 from shapely.geometry import shape, mapping
 import trimesh
 import zipfile
@@ -347,18 +348,22 @@ def _write_zip(job_dir: Path, files: list[Path], base_name: str = "all") -> Path
     return zip_path
 
 
-def _save_polygon(job_dir: Path, polygon) -> Path:
-    poly_path = job_dir / "polygon.json"
-    poly_path.write_text(json.dumps(mapping(polygon)), encoding="utf-8")
-    return poly_path
+def _topology_fields(traced) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "topology": traced.topology,
+        "topology_requested": traced.topology_requested,
+        "topology_detected": traced.topology_detected,
+        "contour_count": traced.contour_count,
+        "cols": traced.cols,
+        "rows": traced.rows,
+    }
+    if traced.grid_hint:
+        fields["grid_hint"] = traced.grid_hint
+    return fields
 
 
-def _load_polygon(job_dir: Path):
-    poly_path = job_dir / "polygon.json"
-    if not poly_path.exists():
-        raise HTTPException(status_code=404, detail="Polygon for this job not found. Trace or prompt again.")
-    data = json.loads(poly_path.read_text(encoding="utf-8"))
-    return shape(data)
+def _persist_trace(job_dir: Path, traced) -> None:
+    save_trace_result(job_dir, traced)
 
 
 def _find_png(job_dir: Path, name: str) -> Path:
@@ -401,6 +406,7 @@ async def trace_from_png(
     smooth_radius: float = Form(1.0),
     extraction_mode: str = Form("auto"),
     delta_e_threshold: float = Form(28.0),
+    topology: str = Form("auto"),
 ):
     name = _safe_name(name)
     if not (file.filename or "").lower().endswith((".png", ".jpg", ".jpeg")):
@@ -423,14 +429,16 @@ async def trace_from_png(
         smooth_radius=smooth_radius,
         extraction_mode=extraction_mode,
         delta_e_threshold=delta_e_threshold,
+        topology=topology,
     )
-    _save_polygon(job_dir, traced.polygon)
+    _persist_trace(job_dir, traced)
 
     result = {
         "job_id": job_dir.name,
         "svg": f"/files/{job_dir.name}/{name}.svg",
         "png": f"/files/{job_dir.name}/{name}.png",
         "extraction_mode": traced.extraction_mode,
+        **_topology_fields(traced),
     }
     if traced.extraction_warning:
         result["warning"] = traced.extraction_warning
@@ -454,6 +462,7 @@ async def pipeline_from_png(
     smooth_radius: float = Form(1.0),
     extraction_mode: str = Form("auto"),
     delta_e_threshold: float = Form(28.0),
+    topology: str = Form("auto"),
 ):
     name = _safe_name(name)
     if not (file.filename or "").lower().endswith((".png", ".jpg", ".jpeg")):
@@ -477,11 +486,12 @@ async def pipeline_from_png(
         smooth_radius=smooth_radius,
         extraction_mode=extraction_mode,
         delta_e_threshold=delta_e_threshold,
+        topology=topology,
     )
-    _save_polygon(job_dir, traced.polygon)
+    _persist_trace(job_dir, traced)
 
-    polygon_to_cookie_cutter_stl(
-        traced.polygon,
+    stl_meta = generate_stl_from_trace(
+        traced,
         str(stl_path),
         target_width_mm=width_mm,
         wall_mm=wall_mm,
@@ -494,7 +504,7 @@ async def pipeline_from_png(
         min_component_area_mm2=min_component_area_mm2,
     )
 
-    zip_path = _write_zip(job_dir, [png_path, svg_path, stl_path], base_name=name)
+    zip_path = _write_zip(job_dir, [png_path, svg_path, stl_path, job_dir / "trace_meta.json"], base_name=name)
 
     result = {
         "job_id": job_dir.name,
@@ -503,7 +513,10 @@ async def pipeline_from_png(
         "stl": f"/files/{job_dir.name}/{name}.stl",
         "zip": f"/files/{job_dir.name}/{zip_path.name}",
         "extraction_mode": traced.extraction_mode,
+        **_topology_fields(traced),
     }
+    if stl_meta.get("height_mm") is not None:
+        result["height_mm"] = stl_meta["height_mm"]
     if traced.extraction_warning:
         result["warning"] = traced.extraction_warning
     return result
@@ -559,13 +572,14 @@ async def pipeline_from_prompt(
         str(png_path),
         str(svg_path),
         smooth_radius=smooth_radius,
+        topology="single",
     )
     # Save prompt for reference
     (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-    _save_polygon(job_dir, traced.polygon)
+    _persist_trace(job_dir, traced)
 
-    polygon_to_cookie_cutter_stl(
-        traced.polygon,
+    generate_stl_from_trace(
+        traced,
         str(stl_path),
         target_width_mm=width_mm,
         wall_mm=wall_mm,
@@ -578,7 +592,11 @@ async def pipeline_from_prompt(
         min_component_area_mm2=min_component_area_mm2,
     )
 
-    zip_path = _write_zip(job_dir, [png_path, svg_path, stl_path, job_dir / "prompt.txt"], base_name=name)
+    zip_path = _write_zip(
+        job_dir,
+        [png_path, svg_path, stl_path, job_dir / "prompt.txt", job_dir / "trace_meta.json"],
+        base_name=name,
+    )
 
     return {
         "job_id": job_dir.name,
@@ -586,6 +604,7 @@ async def pipeline_from_prompt(
         "svg": f"/files/{job_dir.name}/{name}.svg",
         "stl": f"/files/{job_dir.name}/{name}.stl",
         "zip": f"/files/{job_dir.name}/{zip_path.name}",
+        **_topology_fields(traced),
     }
 
 @app.post("/outline/from-prompt")
@@ -629,14 +648,16 @@ async def outline_from_prompt(
         str(png_path),
         str(svg_path),
         smooth_radius=smooth_radius,
+        topology="single",
     )
     (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-    _save_polygon(job_dir, traced.polygon)
+    _persist_trace(job_dir, traced)
 
     return {
         "job_id": job_dir.name,
         "png": f"/files/{job_dir.name}/{name}.png",
         "svg": f"/files/{job_dir.name}/{name}.svg",
+        **_topology_fields(traced),
     }
 
 @app.post("/trace/from-job")
@@ -648,6 +669,7 @@ async def trace_from_job(
     smooth_radius: float = Form(1.0),
     extraction_mode: str = Form("auto"),
     delta_e_threshold: float = Form(28.0),
+    topology: str = Form("auto"),
 ):
     name = _safe_name(name)
     job_dir = _confined_path(job_id)
@@ -665,14 +687,16 @@ async def trace_from_job(
         smooth_radius=smooth_radius,
         extraction_mode=extraction_mode,
         delta_e_threshold=delta_e_threshold,
+        topology=topology,
     )
-    _save_polygon(job_dir, traced.polygon)
+    _persist_trace(job_dir, traced)
 
     result = {
         "job_id": job_dir.name,
         "png": f"/files/{job_dir.name}/{png_path.name}",
         "svg": f"/files/{job_dir.name}/{svg_path.name}",
         "extraction_mode": traced.extraction_mode,
+        **_topology_fields(traced),
     }
     if traced.extraction_warning:
         result["warning"] = traced.extraction_warning
@@ -697,11 +721,14 @@ async def stl_from_job(
     if not job_dir.exists():
         raise HTTPException(status_code=404, detail="job_id not found")
 
-    polygon = _load_polygon(job_dir)
+    try:
+        traced = load_trace_result(job_dir)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Trace data for this job not found. Trace or upload again.")
     stl_path = job_dir / f"{name}.stl"
 
-    polygon_to_cookie_cutter_stl(
-        polygon,
+    stl_meta = generate_stl_from_trace(
+        traced,
         str(stl_path),
         target_width_mm=width_mm,
         wall_mm=wall_mm,
@@ -720,14 +747,22 @@ async def stl_from_job(
         job_dir / f"{name}.svg",
         job_dir / "prompt.txt",
         job_dir / "polygon.json",
+        job_dir / "trace_meta.json",
     ]
     zip_path = _write_zip(job_dir, files, base_name=name)
 
-    return {
+    result = {
         "job_id": job_id,
         "png": f"/files/{job_id}/{name}.png" if (job_dir / f"{name}.png").exists() else None,
         "svg": f"/files/{job_id}/{name}.svg" if (job_dir / f"{name}.svg").exists() else None,
         "stl": f"/files/{job_id}/{name}.stl",
+        **_topology_fields(traced),
+    }
+    if stl_meta.get("height_mm") is not None:
+        result["height_mm"] = stl_meta["height_mm"]
+
+    return {
+        **result,
         "zip": f"/files/{job_id}/{zip_path.name}",
     }
 
