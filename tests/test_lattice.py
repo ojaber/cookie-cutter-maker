@@ -52,6 +52,33 @@ def test_trace_grid_asset_auto(tmp_path: Path) -> None:
     assert svg.exists()
 
 
+def test_lattice_svg_has_correct_line_orientations(tmp_path: Path) -> None:
+    """Vertical image grid lines must render as vertical SVG strokes (not swapped)."""
+    png = Path(__file__).parent / "assets" / "grid_3x4.png"
+    if not png.exists():
+        return
+    svg_path = tmp_path / "grid.svg"
+    trace_png_to_polygon(str(png), str(svg_path), topology="lattice", smooth_radius=0.0)
+    svg = svg_path.read_text(encoding="utf-8")
+
+    import re
+
+    lines = re.findall(
+        r'<line x1="([0-9.+-]+)" y1="([0-9.+-]+)" x2="([0-9.+-]+)" y2="([0-9.+-]+)"',
+        svg,
+    )
+    assert len(lines) == 9  # 4 vertical + 5 horizontal image lines
+
+    vertical = [ln for ln in lines if abs(float(ln[0]) - float(ln[2])) < 1e-4]
+    horizontal = [ln for ln in lines if abs(float(ln[1]) - float(ln[3])) < 1e-4]
+    assert len(vertical) == 4
+    assert len(horizontal) == 5
+
+    for x1, y1, x2, y2 in lines:
+        for v in (x1, y1, x2, y2):
+            assert 0.0 <= float(v) <= 1.0, f"SVG coordinate out of viewBox: {v}"
+
+
 def test_lattice_stl_from_grid_asset(tmp_path: Path) -> None:
     png = Path(__file__).parent / "assets" / "grid_3x4.png"
     if not png.exists():

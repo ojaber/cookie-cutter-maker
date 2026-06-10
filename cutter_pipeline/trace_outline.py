@@ -77,10 +77,10 @@ def _write_single_svg(coords: list[tuple[float, float]], svg_out_path: Path) -> 
 def _write_lattice_svg(lattice, w: int, h: int, svg_out_path: Path) -> str:
     norm = float(max(w, h))
 
-    def norm_pt(x: float, y: float) -> tuple[float, float]:
-        # Match single-shape mirror/orientation conventions.
-        nx = (w - y) / norm
-        ny = (h - x) / norm
+    def norm_pt(col: float, row: float) -> tuple[float, float]:
+        # Match single-shape mirror/orientation conventions (col = image x, row = image y).
+        nx = (w - col) / norm
+        ny = (h - row) / norm
         return nx, ny
 
     min_x, min_y, max_x, max_y = lattice.bounds
@@ -90,16 +90,16 @@ def _write_lattice_svg(lattice, w: int, h: int, svg_out_path: Path) -> str:
     x3, y3 = norm_pt(min_x, max_y)
 
     lines: list[str] = []
-    for x in lattice.x_lines:
-        ax, ay = norm_pt(x, lattice.y_lines[0])
-        bx, by = norm_pt(x, lattice.y_lines[-1])
+    for col in lattice.x_lines:
+        ax, ay = norm_pt(col, lattice.y_lines[0])
+        bx, by = norm_pt(col, lattice.y_lines[-1])
         lines.append(
             f'<line x1="{ax:.6f}" y1="{ay:.6f}" x2="{bx:.6f}" y2="{by:.6f}" '
             f'stroke="#1f6feb" stroke-width="0.004"/>'
         )
-    for y in lattice.y_lines:
-        ax, ay = norm_pt(lattice.x_lines[0], y)
-        bx, by = norm_pt(lattice.x_lines[-1], y)
+    for row in lattice.y_lines:
+        ax, ay = norm_pt(lattice.x_lines[0], row)
+        bx, by = norm_pt(lattice.x_lines[-1], row)
         lines.append(
             f'<line x1="{ax:.6f}" y1="{ay:.6f}" x2="{bx:.6f}" y2="{by:.6f}" '
             f'stroke="#7ee787" stroke-width="0.004"/>'
