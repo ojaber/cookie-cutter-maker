@@ -18,15 +18,18 @@ def _sample_ring(coords, n: int):
 
 def _create_chamfer(
     wall_face: Polygon,
+    base_z: float,
     chamfer_h_mm: float,
     chamfer_out_mm: float,
 ) -> trimesh.Trimesh | None:
-    """Build a SOLID chamfer brace around the outside of the cutting wall.
+    """Build a SOLID chamfer brace in the inner corner where the cutting wall
+    meets the top of the flange shelf.
 
-    Widest at the base (z=0, extending ``chamfer_out_mm`` outward from the
-    wall) and shrinking to zero at z=``chamfer_h_mm``, forming a chamfer that
-    braces the wall-to-flange junction. Built as stacked extruded ring slices
-    so the result is a watertight solid the slicer unions with the rest.
+    Widest on the flange top (z=``base_z``, extending ``chamfer_out_mm`` outward
+    from the wall) and shrinking to zero at z=``base_z`` + ``chamfer_h_mm``,
+    forming a chamfer that braces the wall-to-flange junction. Built as stacked
+    extruded ring slices so the result is a watertight solid the slicer unions
+    with the rest.
     """
     if chamfer_h_mm <= 0 or chamfer_out_mm <= 0:
         return None
@@ -34,8 +37,8 @@ def _create_chamfer(
     steps = max(2, int(np.ceil(chamfer_h_mm / 0.3)))
     meshes: list[trimesh.Trimesh] = []
     for i in range(steps):
-        z0 = chamfer_h_mm * (i / steps)
-        z1 = chamfer_h_mm * ((i + 1) / steps)
+        z0 = base_z + chamfer_h_mm * (i / steps)
+        z1 = base_z + chamfer_h_mm * ((i + 1) / steps)
         t_mid = (i + 0.5) / steps
         width = chamfer_out_mm * (1.0 - t_mid)
         if width <= 1e-6:
@@ -241,8 +244,10 @@ def polygon_to_cookie_cutter_stl(
     parts_to_join = [body, flange]
     if flange_chamfer_mm > 0:
         chamfer_out = min(flange_chamfer_mm, flange_out_mm)
-        chamfer_h = min(flange_chamfer_mm, flange_h_mm, total_h_mm)
-        chamfer = _create_chamfer(scaled, chamfer_h, chamfer_out)
+        # Brace sits on top of the flange shelf and rises up the wall,
+        # without exceeding the wall's remaining height.
+        chamfer_h = min(flange_chamfer_mm, max(0.0, total_h_mm - flange_h_mm))
+        chamfer = _create_chamfer(scaled, flange_h_mm, chamfer_h, chamfer_out)
         if chamfer is not None:
             parts_to_join.append(chamfer)
     mesh = trimesh.util.concatenate(parts_to_join)

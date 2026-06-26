@@ -16,16 +16,19 @@ MIN_WALL_MM = 0.45
 
 def _create_lattice_chamfer(
     wall_face: Polygon,
+    base_z: float,
     chamfer_h_mm: float,
     chamfer_out_mm: float,
 ) -> trimesh.Trimesh | None:
-    """Build a SOLID triangular brace around the outside of the grid walls.
+    """Build a SOLID triangular brace in the inner corner where the grid walls
+    meet the top of the flange shelf.
 
-    The brace is widest at the base (z=0, extending ``chamfer_out_mm`` outward
-    from the grid wall face) and shrinks to zero width at z=``chamfer_h_mm``,
-    forming a 45-style chamfer/fillet that braces the wall-to-flange junction.
-    Built as stacked extruded ring slices so the result is a watertight solid
-    that the slicer unions with the body and flange.
+    The brace sits on the flange top (z=``base_z``) where it is widest
+    (extending ``chamfer_out_mm`` outward from the grid wall face) and shrinks
+    to zero width at z=``base_z`` + ``chamfer_h_mm`` up the wall, forming a
+    fillet that braces the wall-to-flange junction. Built as stacked extruded
+    ring slices so the result is a watertight solid the slicer unions with the
+    body and flange.
     """
     if chamfer_h_mm <= 0 or chamfer_out_mm <= 0:
         return None
@@ -33,8 +36,8 @@ def _create_lattice_chamfer(
     steps = max(2, int(np.ceil(chamfer_h_mm / 0.3)))
     meshes: list[trimesh.Trimesh] = []
     for i in range(steps):
-        z0 = chamfer_h_mm * (i / steps)
-        z1 = chamfer_h_mm * ((i + 1) / steps)
+        z0 = base_z + chamfer_h_mm * (i / steps)
+        z1 = base_z + chamfer_h_mm * ((i + 1) / steps)
         t_mid = (i + 0.5) / steps
         width = chamfer_out_mm * (1.0 - t_mid)
         if width <= 1e-6:
@@ -181,8 +184,12 @@ def lattice_to_cookie_cutter_stl(
             if flange_chamfer_mm > 0:
                 wall_face = outer.buffer(wall_mm / 2, join_style=2)
                 chamfer_out = min(flange_chamfer_mm, flange_out_mm)
-                chamfer_h = min(flange_chamfer_mm, flange_h_mm, total_h_mm)
-                chamfer = _create_lattice_chamfer(wall_face, chamfer_h, chamfer_out)
+                # Brace sits on top of the flange shelf and rises up the wall,
+                # without exceeding the wall's remaining height.
+                chamfer_h = min(flange_chamfer_mm, max(0.0, total_h_mm - flange_h_mm))
+                chamfer = _create_lattice_chamfer(
+                    wall_face, flange_h_mm, chamfer_h, chamfer_out
+                )
                 if chamfer is not None:
                     parts_to_join.append(chamfer)
             # Flange sits at z=0 (build plate / base)
