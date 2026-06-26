@@ -167,6 +167,34 @@ def test_flange_all_lines_fills_outer_corner(tmp_path: Path) -> None:
     assert in_corner > 0, "All-lines flange outer corner is notched/empty."
 
 
+def test_all_lines_with_chamfer_is_watertight_manifold(tmp_path: Path) -> None:
+    """The all-lines flange with a chamfer must export a single watertight,
+    manifold mesh (no non-manifold edges) so slicers don't error."""
+    from collections import Counter
+
+    binary = _make_grid_mask(5, 6)
+    lattice = extract_lattice_from_mask(binary)
+    out_path = tmp_path / "all_lines_chamfer.stl"
+    lattice_to_cookie_cutter_stl(
+        lattice,
+        str(out_path),
+        target_width_mm=95.0,
+        wall_mm=1.4,
+        total_h_mm=15.0,
+        flange_h_mm=3.5,
+        flange_out_mm=2.5,
+        flange_chamfer_mm=0.5,
+        flange_all_lines=True,
+        flange_corner_radius_mm=1.5,
+    )
+    mesh = trimesh.load(out_path, force="mesh")
+    mesh.merge_vertices()
+    counts = Counter(map(tuple, mesh.edges_sorted))
+    non_manifold = sum(1 for k in counts.values() if k != 2)
+    assert non_manifold == 0, f"Mesh has {non_manifold} non-manifold edges."
+    assert mesh.is_watertight, "All-lines + chamfer mesh is not watertight."
+
+
 def test_flange_corner_radius_all_lines_keeps_cells_open(tmp_path: Path) -> None:
     binary = _make_grid_mask(4, 4)
     lattice = extract_lattice_from_mask(binary)

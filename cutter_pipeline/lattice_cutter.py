@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
-from shapely.geometry import LineString, Polygon
+from shapely.geometry import LineString, Polygon, box
 from shapely.ops import unary_union
 
 from cutter_pipeline.lattice_extractor import LatticeGeometry
@@ -29,27 +29,53 @@ def _round_corners(poly, r: float):
     return opened
 
 
+def _union_solids(meshes: list) -> "trimesh.Trimesh | None":
+    """Boolean-union a list of watertight primitive solids into one manifold
+    mesh. Each input must be a closed (watertight) solid; the result is a single
+    watertight, manifold ``Trimesh`` suitable for 3D printing.
+
+    Falls back to a plain concatenation if the boolean backend is unavailable or
+    fails, so STL generation never hard-crashes.
+    """
+    solids = [m for m in meshes if m is not None and len(m.faces) > 0]
+    if not solids:
+        return None
+    if len(solids) == 1:
+        return solids[0]
+    try:
+        result = trimesh.boolean.union(solids)
+    except Exception:
+        result = trimesh.util.concatenate(solids)
+        result.merge_vertices()
+        return result
+    if isinstance(result, trimesh.Scene):
+        result = trimesh.util.concatenate(result.dump())
+    return result
+
+
 def _create_lattice_chamfer(
     wall_face: Polygon,
     base_z: float,
     chamfer_h_mm: float,
     chamfer_out_mm: float,
-) -> trimesh.Trimesh | None:
-    """Build a SOLID triangular brace in the inner corner where the grid walls
-    meet the top of the flange shelf.
+) -> list:
+    """Build a triangular brace in the inner corner where the grid walls meet
+    the top of the flange shelf.
 
     The brace sits on the flange top (z=``base_z``) where it is widest
     (extending ``chamfer_out_mm`` outward from the grid wall face) and shrinks
     to zero width at z=``base_z`` + ``chamfer_h_mm`` up the wall, forming a
-    fillet that braces the wall-to-flange junction. Built as stacked extruded
-    ring slices so the result is a watertight solid the slicer unions with the
-    body and flange.
+    fillet that braces the wall-to-flange junction.
+
+    Returns a LIST of individually watertight slab solids (one per height step
+    and ring part) so they can be boolean-unioned with the body and flange into
+    a single manifold mesh.
     """
     if chamfer_h_mm <= 0 or chamfer_out_mm <= 0:
-        return None
+        return []
 
     steps = max(2, int(np.ceil(chamfer_h_mm / 0.3)))
-    meshes: list[trimesh.Trimesh] = []
+    meshes: list = []
     for i in range(steps):
         z0 = base_z + chamfer_h_mm * (i / steps)
         z1 = base_z + chamfer_h_mm * ((i + 1) / steps)
@@ -68,9 +94,7 @@ def _create_lattice_chamfer(
             mesh.apply_translation([0, 0, z0])
             meshes.append(mesh)
 
-    if not meshes:
-        return None
-    return trimesh.util.concatenate(meshes)
+    return meshes
 
 
 def lattice_to_cookie_cutter_stl(
@@ -173,8 +197,10 @@ def lattice_to_cookie_cutter_stl(
     if not body_meshes:
         raise ValueError("Failed to extrude lattice walls.")
 
-    body = trimesh.util.concatenate(body_meshes)
-    body.merge_vertices()
+    # Collect every watertight primitive solid (wall prisms, flange prisms,
+    # chamfer slabs) and boolean-union them once at the end into a single
+    # manifold mesh, rather than concatenating overlapping solids.
+    solids = list(body_meshes)
 
     outer = Polygon(
         [
@@ -189,19 +215,23 @@ def lattice_to_cookie_cutter_stl(
         wall_face = unary_union(
             [seg.buffer(wall_mm / 2, cap_style=2, join_style=2) for seg in segments]
         )
+        shelf_half = wall_mm / 2 + flange_out_mm
         web = unary_union(
-            [
-                seg.buffer(wall_mm / 2 + flange_out_mm, cap_style=2, join_style=2)
-                for seg in segments
-            ]
+            [seg.buffer(shelf_half, cap_style=2, join_style=2) for seg in segments]
         )
-        # The boundary line shelves use flat caps, so they leave the outer
-        # corner squares unfilled. Union a full perimeter shelf ring to fill
-        # those corners cleanly before any rounding.
-        outer_shelf = outer.buffer(wall_mm / 2 + flange_out_mm, join_style=2).difference(
-            outer.buffer(wall_mm / 2, join_style=2)
-        )
-        flange_ring = unary_union([web, outer_shelf])
+        # The boundary line shelves use flat caps, so they leave the four outer
+        # corner quadrants unfilled (a notched corner). Fill only those quadrants
+        # so the corners are solid. Filling just the notches (rather than a full
+        # perimeter frame) avoids introducing coincident edges along the wall
+        # faces, which would otherwise create non-manifold geometry.
+        x0, y0, x1, y1 = outer.bounds
+        corner_fills = [
+            box(x0 - shelf_half, y0 - shelf_half, x0, y0),
+            box(x1, y0 - shelf_half, x1 + shelf_half, y0),
+            box(x0 - shelf_half, y1, x0, y1 + shelf_half),
+            box(x1, y1, x1 + shelf_half, y1 + shelf_half),
+        ]
+        flange_ring = unary_union([web, *corner_fills])
         # Round only the outer perimeter corners; clip the webbed union to a
         # rounded outer mask so internal cell junctions stay intact.
         if flange_corner_radius_mm > 0:
@@ -225,8 +255,8 @@ def lattice_to_cookie_cutter_stl(
             if not p.is_empty
         ]
         if flange_meshes:
-            flange = trimesh.util.concatenate(flange_meshes)
-            parts_to_join = [body, flange]
+            # Flange sits at z=0 (build plate / base).
+            solids.extend(flange_meshes)
             # Add a solid chamfer brace at the wall-to-flange junction so it
             # isn't a sharp 90-degree stress point. When flange_all_lines is on,
             # wall_face is the full grid mesh, so the chamfer naturally follows
@@ -236,15 +266,13 @@ def lattice_to_cookie_cutter_stl(
                 # Brace sits on top of the flange shelf and rises up the wall,
                 # without exceeding the wall's remaining height.
                 chamfer_h = min(flange_chamfer_mm, max(0.0, total_h_mm - flange_h_mm))
-                chamfer = _create_lattice_chamfer(
-                    wall_face, flange_h_mm, chamfer_h, chamfer_out
+                solids.extend(
+                    _create_lattice_chamfer(wall_face, flange_h_mm, chamfer_h, chamfer_out)
                 )
-                if chamfer is not None:
-                    parts_to_join.append(chamfer)
-            # Flange sits at z=0 (build plate / base)
-            body = trimesh.util.concatenate(parts_to_join)
-            body.merge_vertices()
 
+    body = _union_solids(solids)
+    if body is None:
+        raise ValueError("Failed to build lattice mesh.")
     if body.volume < 0:
         body.invert()
 
