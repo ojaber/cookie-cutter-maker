@@ -16,6 +16,7 @@ def generate_stl_from_trace(
     total_h_mm: float = 25.0,
     flange_h_mm: float = 7.226,
     flange_out_mm: float = 5.0,
+    flange_chamfer_mm: float = 0.0,
     bevel_h_mm: float = 2.0,
     bevel_top_wall_mm: float = 0.5,
     bottom_wall_mm: float = None,
@@ -36,6 +37,7 @@ def generate_stl_from_trace(
             total_h_mm=total_h_mm,
             flange_h_mm=flange_h_mm,
             flange_out_mm=flange_out_mm,
+            flange_chamfer_mm=flange_chamfer_mm,
             bottom_wall_mm=bottom_wall_mm,
             cutting_wall_h_mm=cutting_wall_h_mm,
         )
@@ -56,6 +58,7 @@ def generate_stl_from_trace(
         total_h_mm=total_h_mm,
         flange_h_mm=flange_h_mm,
         flange_out_mm=flange_out_mm,
+        flange_chamfer_mm=flange_chamfer_mm,
         bevel_h_mm=bevel_h_mm,
         bevel_top_wall_mm=bevel_top_wall_mm,
         bottom_wall_mm=bottom_wall_mm,

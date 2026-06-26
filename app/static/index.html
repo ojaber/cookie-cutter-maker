@@ -271,6 +271,9 @@
       <label>Flange outward (mm): <span id="flangeOutVal">2</span> <span class="tip" data-tip="How far the grip flange sticks out horizontally.">?</span></label>
       <input id="flangeOut" type="range" min="0" max="12" value="2" step="0.5"/>
 
+      <label>Flange chamfer (mm): <span id="flangeChamferVal">0</span> <span class="tip" data-tip="Tapered transition between flange and cutting wall for strength. 0 = hard 90° edge.">?</span></label>
+      <input id="flangeChamfer" type="range" min="0" max="3" value="0" step="0.25"/>
+
       <div class="row">
         <div>
           <label>Bottom wall thickness (mm): <span id="bottomWallVal">0.3</span> <span class="tip" data-tip="Thickness of the cutting edge at the bottom. Thinner edge cuts cleaner but may be fragile.">?</span></label>
@@ -461,6 +464,7 @@
   bindRange('height','heightVal');
   bindRange('flangeH','flangeHVal', v => Number(v).toFixed(3));
   bindRange('flangeOut','flangeOutVal');
+  bindRange('flangeChamfer','flangeChamferVal', v => Number(v).toFixed(2));
   bindRange('bottomWall','bottomWallVal', v => Number(v).toFixed(1));
   bindRange('cuttingWallH','cuttingWallHVal');
   bindRange('thr','thrVal');
@@ -644,6 +648,7 @@
     fd.append('total_h_mm', $('height').value);
     fd.append('flange_h_mm', $('flangeH').value);
     fd.append('flange_out_mm', $('flangeOut').value);
+    fd.append('flange_chamfer_mm', $('flangeChamfer').value);
     fd.append('bottom_wall_mm', $('bottomWall').value);
     fd.append('cutting_wall_h_mm', $('cuttingWallH').value);
     fd.append('cleanup_mm', $('cleanup').value);

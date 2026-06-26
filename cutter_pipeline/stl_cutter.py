@@ -16,6 +16,55 @@ def _sample_ring(coords, n: int):
     return [line.interpolate(line.length * (i / n)).coords[0] for i in range(n)]
 
 
+def _create_chamfer(
+    inner_poly: Polygon,
+    outer_poly: Polygon,
+    base_z: float,
+    chamfer_depth: float,
+    samples: int,
+) -> trimesh.Trimesh:
+    """Create a chamfered transition between inner and outer polygons."""
+    from shapely.geometry.polygon import orient
+
+    inner_oriented = orient(inner_poly, sign=1.0)
+    outer_oriented = orient(outer_poly, sign=1.0)
+
+    inner_ring = _sample_ring(list(inner_oriented.exterior.coords))
+    outer_ring = _sample_ring(list(outer_oriented.exterior.coords))
+
+    # Align phases to avoid twisted geometry
+    outer_ring = _align_ring_phase(inner_ring, np.array(outer_ring))
+
+    # Create chamfer with multiple steps for smooth transition
+    chamfer_steps = max(2, int(np.ceil(chamfer_depth / 0.25)))
+    rings: list[tuple[np.ndarray, float]] = []
+
+    for step in range(chamfer_steps + 1):
+        t = step / chamfer_steps
+        z = base_z - (chamfer_depth * t)
+        # Interpolate between inner and outer rings
+        interpolated = inner_ring * (1 - t) + outer_ring * t
+        rings.append((interpolated, z))
+
+    # Generate faces between rings
+    vertices = []
+    faces = []
+
+    for i, (ring, z) in enumerate(rings):
+        vertices.extend(np.column_stack([ring, np.full((samples, 1), z)]))
+
+    for i in range(len(rings) - 1):
+        for j in range(samples):
+            v0 = i * samples + j
+            v1 = i * samples + ((j + 1) % samples)
+            v2 = (i + 1) * samples + j
+            v3 = (i + 1) * samples + ((j + 1) % samples)
+            faces.append([v0, v1, v2])
+            faces.append([v1, v3, v2])
+
+    return trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces), process=False)
+
+
 def _align_ring_phase(reference: np.ndarray, ring: np.ndarray) -> np.ndarray:
     # Keep vertex indexing consistent between neighboring rings to avoid twisted strips.
     distances = np.linalg.norm(ring - reference[0], axis=1)
@@ -31,6 +80,7 @@ def polygon_to_cookie_cutter_stl(
     total_h_mm: float = 25.0,
     flange_h_mm: float = 7.226,
     flange_out_mm: float = 5.0,
+    flange_chamfer_mm: float = 0.0,
     bevel_h_mm: float = 2.0,
     bevel_top_wall_mm: float = 0.5,
     bottom_wall_mm: float = None,
@@ -196,7 +246,14 @@ def polygon_to_cookie_cutter_stl(
     body = drop_caps(body)
     flange = drop_caps(flange)
 
-    mesh = trimesh.util.concatenate([body, flange])
+    # Add chamfer between flange and body if requested
+    if flange_chamfer_mm > 0:
+        chamfer = _create_chamfer(
+            scaled, outer_flange, total_h_mm, flange_chamfer_mm, samples
+        )
+        mesh = trimesh.util.concatenate([body, chamfer, flange])
+    else:
+        mesh = trimesh.util.concatenate([body, flange])
     mesh.merge_vertices()
 
     # Fix normals and enforce outward-facing winding so slicers don't see the mesh inside-out

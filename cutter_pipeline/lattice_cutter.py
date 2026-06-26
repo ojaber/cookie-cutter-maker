@@ -14,6 +14,69 @@ from cutter_pipeline.lattice_extractor import LatticeGeometry
 MIN_WALL_MM = 0.45
 
 
+def _create_lattice_chamfer(
+    inner_poly: Polygon,
+    outer_poly: Polygon,
+    base_z: float,
+    chamfer_depth: float,
+) -> trimesh.Trimesh:
+    """Create a chamfered transition between inner and outer polygons for lattice flanges."""
+    samples = 64  # Fewer samples needed for rectangular lattice flanges
+    from shapely.geometry.polygon import orient
+
+    inner_oriented = orient(inner_poly, sign=1.0)
+    outer_oriented = orient(outer_poly, sign=1.0)
+
+    inner_coords = list(inner_oriented.exterior.coords)
+    outer_coords = list(outer_oriented.exterior.coords)
+
+    # Sample rings
+    if inner_coords[0] != inner_coords[-1]:
+        inner_coords = inner_coords + [inner_coords[0]]
+    if outer_coords[0] != outer_coords[-1]:
+        outer_coords = outer_coords + [outer_coords[0]]
+
+    inner_line = LineString(inner_coords)
+    outer_line = LineString(outer_coords)
+
+    inner_ring = np.array([inner_line.interpolate(inner_line.length * (i / samples)).coords[0] for i in range(samples)])
+    outer_ring = np.array([outer_line.interpolate(outer_line.length * (i / samples)).coords[0] for i in range(samples)])
+
+    # Align phases to avoid twisted geometry
+    distances = np.linalg.norm(outer_ring - inner_ring[0], axis=1)
+    shift = int(np.argmin(distances))
+    outer_ring = np.roll(outer_ring, -shift, axis=0)
+
+    # Create chamfer with multiple steps for smooth transition
+    chamfer_steps = max(2, int(np.ceil(chamfer_depth / 0.25)))
+    rings: list[tuple[np.ndarray, float]] = []
+
+    for step in range(chamfer_steps + 1):
+        t = step / chamfer_steps
+        z = base_z - (chamfer_depth * t)
+        # Interpolate between inner and outer rings
+        interpolated = inner_ring * (1 - t) + outer_ring * t
+        rings.append((interpolated, z))
+
+    # Generate faces between rings
+    vertices = []
+    faces = []
+
+    for i, (ring, z) in enumerate(rings):
+        vertices.extend(np.column_stack([ring, np.full((samples, 1), z)]))
+
+    for i in range(len(rings) - 1):
+        for j in range(samples):
+            v0 = i * samples + j
+            v1 = i * samples + ((j + 1) % samples)
+            v2 = (i + 1) * samples + j
+            v3 = (i + 1) * samples + ((j + 1) % samples)
+            faces.append([v0, v1, v2])
+            faces.append([v1, v3, v2])
+
+    return trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces), process=False)
+
+
 def lattice_to_cookie_cutter_stl(
     lattice: LatticeGeometry,
     out_path: str,
@@ -22,6 +85,7 @@ def lattice_to_cookie_cutter_stl(
     total_h_mm: float = 25.0,
     flange_h_mm: float = 7.226,
     flange_out_mm: float = 5.0,
+    flange_chamfer_mm: float = 0.0,
     bottom_wall_mm: float = None,
     cutting_wall_h_mm: float = None,
 ) -> str:
@@ -133,8 +197,15 @@ def lattice_to_cookie_cutter_stl(
         ]
         if flange_meshes:
             flange = trimesh.util.concatenate(flange_meshes)
-            # Flange sits at z=0 (build plate / base)
-            body = trimesh.util.concatenate([body, flange])
+            # Add chamfer between flange and body if requested
+            if flange_chamfer_mm > 0:
+                chamfer = _create_lattice_chamfer(
+                    outer, flange_outer, total_h_mm, flange_chamfer_mm
+                )
+                body = trimesh.util.concatenate([body, chamfer, flange])
+            else:
+                # Flange sits at z=0 (build plate / base)
+                body = trimesh.util.concatenate([body, flange])
             body.merge_vertices()
 
     if body.volume < 0:
