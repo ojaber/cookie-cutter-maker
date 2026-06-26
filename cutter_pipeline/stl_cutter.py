@@ -74,7 +74,7 @@ def polygon_to_cookie_cutter_stl(
     total_h_mm: float = 25.0,
     flange_h_mm: float = 7.226,
     flange_out_mm: float = 5.0,
-    flange_chamfer_mm: float = 0.0,
+    flange_chamfer_mm: float = 0.5,
     bevel_h_mm: float = 2.0,
     bevel_top_wall_mm: float = 0.5,
     bottom_wall_mm: float = None,
