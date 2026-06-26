@@ -17,52 +17,43 @@ def _sample_ring(coords, n: int):
 
 
 def _create_chamfer(
-    inner_poly: Polygon,
-    outer_poly: Polygon,
-    base_z: float,
-    chamfer_depth: float,
-    samples: int,
-) -> trimesh.Trimesh:
-    """Create a chamfered transition between inner and outer polygons."""
-    from shapely.geometry.polygon import orient
+    wall_face: Polygon,
+    chamfer_h_mm: float,
+    chamfer_out_mm: float,
+) -> trimesh.Trimesh | None:
+    """Build a SOLID chamfer brace around the outside of the cutting wall.
 
-    inner_oriented = orient(inner_poly, sign=1.0)
-    outer_oriented = orient(outer_poly, sign=1.0)
+    Widest at the base (z=0, extending ``chamfer_out_mm`` outward from the
+    wall) and shrinking to zero at z=``chamfer_h_mm``, forming a chamfer that
+    braces the wall-to-flange junction. Built as stacked extruded ring slices
+    so the result is a watertight solid the slicer unions with the rest.
+    """
+    if chamfer_h_mm <= 0 or chamfer_out_mm <= 0:
+        return None
 
-    inner_ring = _sample_ring(list(inner_oriented.exterior.coords))
-    outer_ring = _sample_ring(list(outer_oriented.exterior.coords))
+    steps = max(2, int(np.ceil(chamfer_h_mm / 0.3)))
+    meshes: list[trimesh.Trimesh] = []
+    for i in range(steps):
+        z0 = chamfer_h_mm * (i / steps)
+        z1 = chamfer_h_mm * ((i + 1) / steps)
+        t_mid = (i + 0.5) / steps
+        width = chamfer_out_mm * (1.0 - t_mid)
+        if width <= 1e-6:
+            continue
+        ring = wall_face.buffer(width, join_style=1).difference(wall_face)
+        if ring.is_empty:
+            continue
+        ring_parts = list(ring.geoms) if ring.geom_type == "MultiPolygon" else [ring]
+        for part in ring_parts:
+            if part.is_empty:
+                continue
+            mesh = trimesh.creation.extrude_polygon(part, z1 - z0, engine="earcut")
+            mesh.apply_translation([0, 0, z0])
+            meshes.append(mesh)
 
-    # Align phases to avoid twisted geometry
-    outer_ring = _align_ring_phase(inner_ring, np.array(outer_ring))
-
-    # Create chamfer with multiple steps for smooth transition
-    chamfer_steps = max(2, int(np.ceil(chamfer_depth / 0.25)))
-    rings: list[tuple[np.ndarray, float]] = []
-
-    for step in range(chamfer_steps + 1):
-        t = step / chamfer_steps
-        z = base_z - (chamfer_depth * t)
-        # Interpolate between inner and outer rings
-        interpolated = inner_ring * (1 - t) + outer_ring * t
-        rings.append((interpolated, z))
-
-    # Generate faces between rings
-    vertices = []
-    faces = []
-
-    for i, (ring, z) in enumerate(rings):
-        vertices.extend(np.column_stack([ring, np.full((samples, 1), z)]))
-
-    for i in range(len(rings) - 1):
-        for j in range(samples):
-            v0 = i * samples + j
-            v1 = i * samples + ((j + 1) % samples)
-            v2 = (i + 1) * samples + j
-            v3 = (i + 1) * samples + ((j + 1) % samples)
-            faces.append([v0, v1, v2])
-            faces.append([v1, v3, v2])
-
-    return trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces), process=False)
+    if not meshes:
+        return None
+    return trimesh.util.concatenate(meshes)
 
 
 def _align_ring_phase(reference: np.ndarray, ring: np.ndarray) -> np.ndarray:
@@ -246,14 +237,15 @@ def polygon_to_cookie_cutter_stl(
     body = drop_caps(body)
     flange = drop_caps(flange)
 
-    # Add chamfer between flange and body if requested
+    # Add a solid chamfer brace at the wall-to-flange junction if requested.
+    parts_to_join = [body, flange]
     if flange_chamfer_mm > 0:
-        chamfer = _create_chamfer(
-            scaled, outer_flange, total_h_mm, flange_chamfer_mm, samples
-        )
-        mesh = trimesh.util.concatenate([body, chamfer, flange])
-    else:
-        mesh = trimesh.util.concatenate([body, flange])
+        chamfer_out = min(flange_chamfer_mm, flange_out_mm)
+        chamfer_h = min(flange_chamfer_mm, flange_h_mm, total_h_mm)
+        chamfer = _create_chamfer(scaled, chamfer_h, chamfer_out)
+        if chamfer is not None:
+            parts_to_join.append(chamfer)
+    mesh = trimesh.util.concatenate(parts_to_join)
     mesh.merge_vertices()
 
     # Fix normals and enforce outward-facing winding so slicers don't see the mesh inside-out

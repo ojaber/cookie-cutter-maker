@@ -15,66 +15,44 @@ MIN_WALL_MM = 0.45
 
 
 def _create_lattice_chamfer(
-    inner_poly: Polygon,
-    outer_poly: Polygon,
-    base_z: float,
-    chamfer_depth: float,
-) -> trimesh.Trimesh:
-    """Create a chamfered transition between inner and outer polygons for lattice flanges."""
-    samples = 64  # Fewer samples needed for rectangular lattice flanges
-    from shapely.geometry.polygon import orient
+    wall_face: Polygon,
+    chamfer_h_mm: float,
+    chamfer_out_mm: float,
+) -> trimesh.Trimesh | None:
+    """Build a SOLID triangular brace around the outside of the grid walls.
 
-    inner_oriented = orient(inner_poly, sign=1.0)
-    outer_oriented = orient(outer_poly, sign=1.0)
+    The brace is widest at the base (z=0, extending ``chamfer_out_mm`` outward
+    from the grid wall face) and shrinks to zero width at z=``chamfer_h_mm``,
+    forming a 45-style chamfer/fillet that braces the wall-to-flange junction.
+    Built as stacked extruded ring slices so the result is a watertight solid
+    that the slicer unions with the body and flange.
+    """
+    if chamfer_h_mm <= 0 or chamfer_out_mm <= 0:
+        return None
 
-    inner_coords = list(inner_oriented.exterior.coords)
-    outer_coords = list(outer_oriented.exterior.coords)
+    steps = max(2, int(np.ceil(chamfer_h_mm / 0.3)))
+    meshes: list[trimesh.Trimesh] = []
+    for i in range(steps):
+        z0 = chamfer_h_mm * (i / steps)
+        z1 = chamfer_h_mm * ((i + 1) / steps)
+        t_mid = (i + 0.5) / steps
+        width = chamfer_out_mm * (1.0 - t_mid)
+        if width <= 1e-6:
+            continue
+        ring = wall_face.buffer(width, join_style=2).difference(wall_face)
+        if ring.is_empty:
+            continue
+        ring_parts = list(ring.geoms) if ring.geom_type == "MultiPolygon" else [ring]
+        for part in ring_parts:
+            if part.is_empty:
+                continue
+            mesh = trimesh.creation.extrude_polygon(part, z1 - z0, engine="earcut")
+            mesh.apply_translation([0, 0, z0])
+            meshes.append(mesh)
 
-    # Sample rings
-    if inner_coords[0] != inner_coords[-1]:
-        inner_coords = inner_coords + [inner_coords[0]]
-    if outer_coords[0] != outer_coords[-1]:
-        outer_coords = outer_coords + [outer_coords[0]]
-
-    inner_line = LineString(inner_coords)
-    outer_line = LineString(outer_coords)
-
-    inner_ring = np.array([inner_line.interpolate(inner_line.length * (i / samples)).coords[0] for i in range(samples)])
-    outer_ring = np.array([outer_line.interpolate(outer_line.length * (i / samples)).coords[0] for i in range(samples)])
-
-    # Align phases to avoid twisted geometry
-    distances = np.linalg.norm(outer_ring - inner_ring[0], axis=1)
-    shift = int(np.argmin(distances))
-    outer_ring = np.roll(outer_ring, -shift, axis=0)
-
-    # Create chamfer with multiple steps for smooth transition
-    chamfer_steps = max(2, int(np.ceil(chamfer_depth / 0.25)))
-    rings: list[tuple[np.ndarray, float]] = []
-
-    for step in range(chamfer_steps + 1):
-        t = step / chamfer_steps
-        z = base_z + (chamfer_depth * t)
-        # Interpolate between inner and outer rings
-        interpolated = inner_ring * (1 - t) + outer_ring * t
-        rings.append((interpolated, z))
-
-    # Generate faces between rings
-    vertices = []
-    faces = []
-
-    for i, (ring, z) in enumerate(rings):
-        vertices.extend(np.column_stack([ring, np.full((samples, 1), z)]))
-
-    for i in range(len(rings) - 1):
-        for j in range(samples):
-            v0 = i * samples + j
-            v1 = i * samples + ((j + 1) % samples)
-            v2 = (i + 1) * samples + j
-            v3 = (i + 1) * samples + ((j + 1) % samples)
-            faces.append([v0, v1, v2])
-            faces.append([v1, v3, v2])
-
-    return trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces), process=False)
+    if not meshes:
+        return None
+    return trimesh.util.concatenate(meshes)
 
 
 def lattice_to_cookie_cutter_stl(
@@ -197,15 +175,18 @@ def lattice_to_cookie_cutter_stl(
         ]
         if flange_meshes:
             flange = trimesh.util.concatenate(flange_meshes)
-            # Add chamfer between flange and body if requested
+            parts_to_join = [body, flange]
+            # Add a solid chamfer brace around the grid's outer wall face so the
+            # wall-to-flange junction isn't a sharp 90-degree stress point.
             if flange_chamfer_mm > 0:
-                chamfer = _create_lattice_chamfer(
-                    outer, flange_outer, 0.0, flange_chamfer_mm
-                )
-                body = trimesh.util.concatenate([body, chamfer, flange])
-            else:
-                # Flange sits at z=0 (build plate / base)
-                body = trimesh.util.concatenate([body, flange])
+                wall_face = outer.buffer(wall_mm / 2, join_style=2)
+                chamfer_out = min(flange_chamfer_mm, flange_out_mm)
+                chamfer_h = min(flange_chamfer_mm, flange_h_mm, total_h_mm)
+                chamfer = _create_lattice_chamfer(wall_face, chamfer_h, chamfer_out)
+                if chamfer is not None:
+                    parts_to_join.append(chamfer)
+            # Flange sits at z=0 (build plate / base)
+            body = trimesh.util.concatenate(parts_to_join)
             body.merge_vertices()
 
     if body.volume < 0:
