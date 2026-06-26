@@ -274,6 +274,11 @@
       <label>Flange chamfer (mm): <span id="flangeChamferVal">0.50</span> <span class="tip" data-tip="Tapered transition between flange and cutting wall for strength. 0 = hard 90° edge.">?</span></label>
       <input id="flangeChamfer" type="range" min="0" max="3" value="0.5" step="0.25"/>
 
+      <div id="flangeAllLinesGroup">
+        <label>Flange on all grid lines <span class="tip" data-tip="Grid mode only: build the flange shelf (and chamfer) along every internal AND external grid line, not just the outer border. Adds a webbed base for strength.">?</span></label>
+        <input id="flangeAllLines" type="checkbox" />
+      </div>
+
       <div class="row">
         <div>
           <label>Bottom wall thickness (mm): <span id="bottomWallVal">0.3</span> <span class="tip" data-tip="Thickness of the cutting edge at the bottom. Thinner edge cuts cleaner but may be fragile.">?</span></label>
@@ -510,6 +515,13 @@
       el.style.opacity = isLattice ? '0.45' : '1';
       el.querySelectorAll('input').forEach(inp => { inp.disabled = isLattice; });
     });
+    const latticeOnly = ['flangeAllLinesGroup'];
+    latticeOnly.forEach(id => {
+      const el = $(id);
+      if (!el) return;
+      el.style.opacity = isLattice ? '1' : '0.45';
+      el.querySelectorAll('input').forEach(inp => { inp.disabled = !isLattice; });
+    });
     $('widthLabel').textContent = isLattice ? 'Grid width (mm)' : 'Width (mm)';
     $('widthTip').setAttribute('data-tip', isLattice
       ? 'Width of the full grid; height scales automatically to keep cell proportions.'
@@ -649,6 +661,7 @@
     fd.append('flange_h_mm', $('flangeH').value);
     fd.append('flange_out_mm', $('flangeOut').value);
     fd.append('flange_chamfer_mm', $('flangeChamfer').value);
+    fd.append('flange_all_lines', $('flangeAllLines').checked);
     fd.append('bottom_wall_mm', $('bottomWall').value);
     fd.append('cutting_wall_h_mm', $('cuttingWallH').value);
     fd.append('cleanup_mm', $('cleanup').value);

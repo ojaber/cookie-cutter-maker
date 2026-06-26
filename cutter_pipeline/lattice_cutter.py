@@ -67,6 +67,7 @@ def lattice_to_cookie_cutter_stl(
     flange_h_mm: float = 7.226,
     flange_out_mm: float = 5.0,
     flange_chamfer_mm: float = 0.5,
+    flange_all_lines: bool = False,
     bottom_wall_mm: float = None,
     cutting_wall_h_mm: float = None,
 ) -> str:
@@ -167,8 +168,22 @@ def lattice_to_cookie_cutter_stl(
             to_mm(lattice.x_lines[0], lattice.y_lines[-1]),
         ]
     )
-    flange_outer = outer.buffer(flange_out_mm, join_style=2)
-    flange_ring = flange_outer.difference(outer.buffer(wall_mm / 2, join_style=2))
+    if flange_all_lines:
+        # Flange shelf and chamfer follow every internal and external grid line.
+        wall_face = unary_union(
+            [seg.buffer(wall_mm / 2, cap_style=2, join_style=2) for seg in segments]
+        )
+        flange_ring = unary_union(
+            [
+                seg.buffer(wall_mm / 2 + flange_out_mm, cap_style=2, join_style=2)
+                for seg in segments
+            ]
+        )
+    else:
+        # Flange shelf and chamfer only on the outer border.
+        wall_face = outer.buffer(wall_mm / 2, join_style=2)
+        flange_outer = outer.buffer(flange_out_mm, join_style=2)
+        flange_ring = flange_outer.difference(wall_face)
     if not flange_ring.is_empty:
         flange_parts = list(flange_ring.geoms) if flange_ring.geom_type == "MultiPolygon" else [flange_ring]
         flange_meshes = [
@@ -179,10 +194,11 @@ def lattice_to_cookie_cutter_stl(
         if flange_meshes:
             flange = trimesh.util.concatenate(flange_meshes)
             parts_to_join = [body, flange]
-            # Add a solid chamfer brace around the grid's outer wall face so the
-            # wall-to-flange junction isn't a sharp 90-degree stress point.
+            # Add a solid chamfer brace at the wall-to-flange junction so it
+            # isn't a sharp 90-degree stress point. When flange_all_lines is on,
+            # wall_face is the full grid mesh, so the chamfer naturally follows
+            # the outer border AND every internal cell wall.
             if flange_chamfer_mm > 0:
-                wall_face = outer.buffer(wall_mm / 2, join_style=2)
                 chamfer_out = min(flange_chamfer_mm, flange_out_mm)
                 # Brace sits on top of the flange shelf and rises up the wall,
                 # without exceeding the wall's remaining height.

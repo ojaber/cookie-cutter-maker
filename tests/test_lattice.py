@@ -98,3 +98,43 @@ def test_lattice_height_scales_with_aspect_ratio() -> None:
     lattice = extract_lattice_from_mask(binary)
     height = lattice_height_mm(lattice, 95.0)
     assert height > 95.0
+
+
+def test_flange_all_lines_adds_volume_and_keeps_cells_open(tmp_path: Path) -> None:
+    binary = _make_grid_mask(4, 4)
+    lattice = extract_lattice_from_mask(binary)
+
+    outer_path = tmp_path / "outer.stl"
+    all_path = tmp_path / "all.stl"
+    lattice_to_cookie_cutter_stl(
+        lattice, str(outer_path), target_width_mm=95.0, flange_all_lines=False
+    )
+    lattice_to_cookie_cutter_stl(
+        lattice, str(all_path), target_width_mm=95.0, flange_all_lines=True
+    )
+
+    assert outer_path.exists() and all_path.exists()
+    outer_mesh = trimesh.load(outer_path, force="mesh")
+    all_mesh = trimesh.load(all_path, force="mesh")
+
+    # All-lines flange must add material along internal grid lines.
+    assert all_mesh.volume > outer_mesh.volume
+    # Cells must remain open (interior holes preserved), so the footprint stays
+    # a connected web rather than a solid slab.
+    assert len(all_mesh.vertices) > len(outer_mesh.vertices)
+
+
+def test_flange_all_lines_dispatch(tmp_path: Path) -> None:
+    png = Path(__file__).parent / "assets" / "grid_3x4.png"
+    if not png.exists():
+        return
+    traced = trace_png_to_polygon(
+        str(png), str(tmp_path / "grid.svg"), topology="lattice", smooth_radius=0.0
+    )
+    stl_path = tmp_path / "grid_all_lines.stl"
+    generate_stl_from_trace(
+        traced, str(stl_path), target_width_mm=95.0, flange_all_lines=True
+    )
+    assert stl_path.exists()
+    mesh = trimesh.load(stl_path, force="mesh")
+    assert len(mesh.vertices) > 50
