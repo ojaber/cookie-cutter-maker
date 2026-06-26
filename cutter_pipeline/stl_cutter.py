@@ -9,6 +9,21 @@ from shapely.geometry.polygon import orient
 MIN_BEVEL_TOP_WALL_MM = 0.45
 
 
+def _round_corners(poly, r: float):
+    """Round the convex (outer) corners of a polygon by radius ``r`` using a
+    morphological opening (erode then dilate with round joins).
+
+    Falls back to the original polygon if rounding would erode too much (e.g.
+    thin features on a delicate outline), so it never destroys geometry.
+    """
+    if r <= 0:
+        return poly
+    opened = poly.buffer(-r, join_style=1).buffer(r, join_style=1)
+    if opened.is_empty or opened.area < 0.6 * poly.area:
+        return poly
+    return opened
+
+
 def _sample_ring(coords, n: int):
     if coords[0] != coords[-1]:
         coords = list(coords) + [coords[0]]
@@ -75,6 +90,7 @@ def polygon_to_cookie_cutter_stl(
     flange_h_mm: float = 7.226,
     flange_out_mm: float = 5.0,
     flange_chamfer_mm: float = 0.5,
+    flange_corner_radius_mm: float = 0.0,
     bevel_h_mm: float = 2.0,
     bevel_top_wall_mm: float = 0.5,
     bottom_wall_mm: float = None,
@@ -126,7 +142,13 @@ def polygon_to_cookie_cutter_stl(
     else:
         raise ValueError("Inner offset collapsed. Increase target_width_mm or reduce wall_mm.")
 
-    outer_flange = scaled.buffer(flange_out_mm, join_style=1, cap_style=2).buffer(0)
+    # Offset the flange with mitre joins (sharp corners by default), then round
+    # the outer corners only by the explicit corner-radius slider. This matches
+    # the grid cutter's behavior so both are controlled solely by the slider.
+    outer_flange = _round_corners(
+        scaled.buffer(flange_out_mm, join_style=2, mitre_limit=2.0).buffer(0),
+        flange_corner_radius_mm,
+    )
 
     # If user supplied cutting-edge controls, they override the built-in bevel defaults.
     if bottom_wall_mm is not None and cutting_wall_h_mm is not None:

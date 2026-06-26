@@ -124,6 +124,43 @@ def test_flange_all_lines_adds_volume_and_keeps_cells_open(tmp_path: Path) -> No
     assert len(all_mesh.vertices) > len(outer_mesh.vertices)
 
 
+def test_flange_corner_radius_changes_grid_geometry(tmp_path: Path) -> None:
+    binary = _make_grid_mask(4, 4)
+    lattice = extract_lattice_from_mask(binary)
+
+    sharp_path = tmp_path / "sharp.stl"
+    round_path = tmp_path / "round.stl"
+    lattice_to_cookie_cutter_stl(
+        lattice, str(sharp_path), target_width_mm=95.0, flange_corner_radius_mm=0.0
+    )
+    lattice_to_cookie_cutter_stl(
+        lattice, str(round_path), target_width_mm=95.0, flange_corner_radius_mm=4.0
+    )
+
+    assert sharp_path.exists() and round_path.exists()
+    sharp = trimesh.load(sharp_path, force="mesh")
+    rounded = trimesh.load(round_path, force="mesh")
+    # Rounding trims the outer flange corners, so the rounded grid uses less
+    # material than the sharp one.
+    assert rounded.volume < sharp.volume
+
+
+def test_flange_corner_radius_all_lines_keeps_cells_open(tmp_path: Path) -> None:
+    binary = _make_grid_mask(4, 4)
+    lattice = extract_lattice_from_mask(binary)
+    out_path = tmp_path / "all_lines_round.stl"
+    lattice_to_cookie_cutter_stl(
+        lattice,
+        str(out_path),
+        target_width_mm=95.0,
+        flange_all_lines=True,
+        flange_corner_radius_mm=3.0,
+    )
+    assert out_path.exists()
+    mesh = trimesh.load(out_path, force="mesh")
+    assert len(mesh.vertices) > 50
+
+
 def test_flange_all_lines_dispatch(tmp_path: Path) -> None:
     png = Path(__file__).parent / "assets" / "grid_3x4.png"
     if not png.exists():

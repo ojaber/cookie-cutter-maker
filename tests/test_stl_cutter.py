@@ -125,6 +125,52 @@ def test_taper_top_wall_has_minimum_guard(tmp_path: Path) -> None:
     assert min_top_wall >= 0.43, f"Top wall guard failed, got {min_top_wall:.3f}mm"
 
 
+def test_flange_corner_radius_rounds_corners(tmp_path: Path) -> None:
+    square = box(0, 0, 1, 1)
+    sharp_path = tmp_path / "sharp.stl"
+    round_path = tmp_path / "round.stl"
+
+    polygon_to_cookie_cutter_stl(
+        square,
+        str(sharp_path),
+        target_width_mm=80.0,
+        wall_mm=1.2,
+        total_h_mm=20.0,
+        flange_h_mm=6.0,
+        flange_out_mm=5.0,
+        flange_corner_radius_mm=0.0,
+        cleanup_mm=0.0,
+        tip_smooth_mm=0.0,
+        drop_holes=True,
+        min_component_area_mm2=1.0,
+    )
+    polygon_to_cookie_cutter_stl(
+        square,
+        str(round_path),
+        target_width_mm=80.0,
+        wall_mm=1.2,
+        total_h_mm=20.0,
+        flange_h_mm=6.0,
+        flange_out_mm=5.0,
+        flange_corner_radius_mm=4.0,
+        cleanup_mm=0.0,
+        tip_smooth_mm=0.0,
+        drop_holes=True,
+        min_component_area_mm2=1.0,
+    )
+
+    assert sharp_path.exists() and round_path.exists()
+    sharp = trimesh.load(sharp_path, force="mesh")
+    rounded = trimesh.load(round_path, force="mesh")
+    # Rounding the corners trims the outer flange footprint, so the bounding
+    # box of the rounded version should be no larger than the sharp one and the
+    # geometry should differ.
+    assert rounded.extents[0] <= sharp.extents[0] + 1e-6
+    assert not np.allclose(sorted(sharp.extents), sorted(rounded.extents)) or (
+        len(rounded.vertices) != len(sharp.vertices)
+    )
+
+
 def test_wall_thickness_has_minimum_guard(tmp_path: Path) -> None:
     square = box(0, 0, 1, 1)
     out_path = tmp_path / "wall_guard.stl"

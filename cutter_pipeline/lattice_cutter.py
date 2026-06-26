@@ -14,6 +14,21 @@ from cutter_pipeline.lattice_extractor import LatticeGeometry
 MIN_WALL_MM = 0.45
 
 
+def _round_corners(poly, r: float):
+    """Round the convex (outer) corners of a polygon by radius ``r`` using a
+    morphological opening (erode then dilate with round joins).
+
+    Falls back to the original polygon if rounding would erode too much (e.g.
+    thin features), so it never destroys delicate geometry.
+    """
+    if r <= 0:
+        return poly
+    opened = poly.buffer(-r, join_style=1).buffer(r, join_style=1)
+    if opened.is_empty or opened.area < 0.6 * poly.area:
+        return poly
+    return opened
+
+
 def _create_lattice_chamfer(
     wall_face: Polygon,
     base_z: float,
@@ -68,6 +83,7 @@ def lattice_to_cookie_cutter_stl(
     flange_out_mm: float = 5.0,
     flange_chamfer_mm: float = 0.5,
     flange_all_lines: bool = False,
+    flange_corner_radius_mm: float = 0.0,
     bottom_wall_mm: float = None,
     cutting_wall_h_mm: float = None,
 ) -> str:
@@ -179,10 +195,20 @@ def lattice_to_cookie_cutter_stl(
                 for seg in segments
             ]
         )
+        # Round only the outer perimeter corners; clip the webbed union to a
+        # rounded outer mask so internal cell junctions stay intact.
+        if flange_corner_radius_mm > 0:
+            mask = _round_corners(
+                outer.buffer(wall_mm / 2 + flange_out_mm, join_style=2),
+                flange_corner_radius_mm,
+            )
+            flange_ring = flange_ring.intersection(mask)
     else:
         # Flange shelf and chamfer only on the outer border.
         wall_face = outer.buffer(wall_mm / 2, join_style=2)
-        flange_outer = outer.buffer(flange_out_mm, join_style=2)
+        flange_outer = _round_corners(
+            outer.buffer(flange_out_mm, join_style=2), flange_corner_radius_mm
+        )
         flange_ring = flange_outer.difference(wall_face)
     if not flange_ring.is_empty:
         flange_parts = list(flange_ring.geoms) if flange_ring.geom_type == "MultiPolygon" else [flange_ring]
