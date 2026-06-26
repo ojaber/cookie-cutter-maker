@@ -379,7 +379,7 @@
     scene.add(dir);
 
     const grid = new THREE.GridHelper(160, 8, 0x334155, 0x1e293b);
-    grid.position.y = -40;
+    grid.position.y = 0;
     scene.add(grid);
 
     const animate = () => {
@@ -417,12 +417,14 @@
         geom.computeBoundingBox();
         const mat = new THREE.MeshStandardMaterial({ color: 0x8ab4f8, metalness: 0.1, roughness: 0.35 });
         stlMesh = new THREE.Mesh(geom, mat);
+        stlMesh.rotation.x = -Math.PI / 2;
         scene.add(stlMesh);
 
-        const bbox = geom.boundingBox;
-        const size = bbox.getSize(new THREE.Vector3());
-        const center = bbox.getCenter(new THREE.Vector3());
+        const box = new THREE.Box3().setFromObject(stlMesh);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
         stlMesh.position.sub(center);
+        stlMesh.position.y += size.y / 2;
         const maxDim = Math.max(size.x, size.y, size.z);
         const camDist = maxDim * 1.6;
         camera.position.set(camDist, camDist, camDist);

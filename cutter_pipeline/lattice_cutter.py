@@ -62,16 +62,27 @@ def lattice_to_cookie_cutter_stl(
         return unary_union(polys)
 
     if use_taper:
-        # Build layered slices: thin at z=0, full at z=cutting_wall_h_mm
-        taper_steps = max(2, int(np.ceil(cutting_wall_h_mm / 0.5)))
+        # Full-thickness section from z=0 to z=(total_h_mm - cutting_wall_h_mm)
         body_meshes = []
+        full_h = total_h_mm - cutting_wall_h_mm
+        if full_h > 0:
+            full_union = _make_lattice_union(wall_mm / 2)
+            if not full_union.is_empty:
+                full_parts = list(full_union.geoms) if full_union.geom_type == "MultiPolygon" else [full_union]
+                for part in full_parts:
+                    if part.is_empty:
+                        continue
+                    mesh = trimesh.creation.extrude_polygon(part, full_h, engine="earcut")
+                    body_meshes.append(mesh)
+        # Taper slices: full wall at z=full_h, thin at z=total_h_mm (cutting tip)
+        taper_steps = max(2, int(np.ceil(cutting_wall_h_mm / 0.5)))
         for step in range(taper_steps):
             t0 = step / taper_steps
             t1 = (step + 1) / taper_steps
-            z0 = cutting_wall_h_mm * t0
-            z1 = cutting_wall_h_mm * t1
+            z0 = full_h + cutting_wall_h_mm * t0
+            z1 = full_h + cutting_wall_h_mm * t1
             t_mid = (t0 + t1) / 2
-            cur_wall = bottom_wall_mm + (wall_mm - bottom_wall_mm) * t_mid
+            cur_wall = wall_mm + (bottom_wall_mm - wall_mm) * t_mid
             layer_union = _make_lattice_union(cur_wall / 2)
             if layer_union.is_empty:
                 continue
@@ -82,17 +93,6 @@ def lattice_to_cookie_cutter_stl(
                 mesh = trimesh.creation.extrude_polygon(part, z1 - z0, engine="earcut")
                 mesh.apply_translation([0, 0, z0])
                 body_meshes.append(mesh)
-        # Full-thickness section from cutting_wall_h_mm to total_h_mm
-        if total_h_mm > cutting_wall_h_mm:
-            full_union = _make_lattice_union(wall_mm / 2)
-            if not full_union.is_empty:
-                full_parts = list(full_union.geoms) if full_union.geom_type == "MultiPolygon" else [full_union]
-                for part in full_parts:
-                    if part.is_empty:
-                        continue
-                    mesh = trimesh.creation.extrude_polygon(part, total_h_mm - cutting_wall_h_mm, engine="earcut")
-                    mesh.apply_translation([0, 0, cutting_wall_h_mm])
-                    body_meshes.append(mesh)
     else:
         wall_polys = [
             seg.buffer(wall_mm / 2, cap_style=2, join_style=2)
@@ -133,7 +133,7 @@ def lattice_to_cookie_cutter_stl(
         ]
         if flange_meshes:
             flange = trimesh.util.concatenate(flange_meshes)
-            flange.apply_translation([0, 0, total_h_mm - flange_h_mm])
+            # Flange sits at z=0 (build plate / base)
             body = trimesh.util.concatenate([body, flange])
             body.merge_vertices()
 
