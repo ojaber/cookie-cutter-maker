@@ -33,6 +33,8 @@ def polygon_to_cookie_cutter_stl(
     flange_out_mm: float = 5.0,
     bevel_h_mm: float = 2.0,
     bevel_top_wall_mm: float = 0.5,
+    bottom_wall_mm: float = None,
+    cutting_wall_h_mm: float = None,
     samples: int = 520,
     cleanup_mm: float = 0.5,
     drop_holes: bool = True,
@@ -81,6 +83,11 @@ def polygon_to_cookie_cutter_stl(
         raise ValueError("Inner offset collapsed. Increase target_width_mm or reduce wall_mm.")
 
     outer_flange = scaled.buffer(flange_out_mm, join_style=1, cap_style=2).buffer(0)
+
+    # If user supplied cutting-edge controls, they override the built-in bevel defaults.
+    if bottom_wall_mm is not None and cutting_wall_h_mm is not None:
+        bevel_top_wall_mm = bottom_wall_mm
+        bevel_h_mm = cutting_wall_h_mm
 
     bevel_h_mm = max(0.0, min(bevel_h_mm, total_h_mm))
     # Keep cutter tips from becoming unprintably thin/brittle.

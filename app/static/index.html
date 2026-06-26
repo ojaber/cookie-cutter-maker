@@ -272,6 +272,17 @@
       <input id="flangeOut" type="range" min="0" max="12" value="5" step="0.5"/>
 
       <div class="row">
+        <div>
+          <label>Bottom wall thickness (mm): <span id="bottomWallVal">0.5</span> <span class="tip" data-tip="Thickness of the cutting edge at the bottom. Thinner edge cuts cleaner but may be fragile.">?</span></label>
+          <input id="bottomWall" type="range" min="0.1" max="2.0" value="0.5" step="0.1"/>
+        </div>
+        <div>
+          <label>Cutting wall height (mm): <span id="cuttingWallHVal">5</span> <span class="tip" data-tip="Height of the thinner cutting edge portion. Tapers up to full wall thickness above this height.">?</span></label>
+          <input id="cuttingWallH" type="range" min="0.5" max="20" value="5" step="0.5"/>
+        </div>
+      </div>
+
+      <div class="row">
         <div id="cleanupGroup">
           <label>Cleanup (mm): <span id="cleanupVal">0.5</span> <span class="tip" data-tip="Morphological smoothing to remove tiny zig-zags or noise before offsetting.">?</span></label>
           <input id="cleanup" type="range" min="0" max="2" value="0.5" step="0.1"/>
@@ -448,6 +459,8 @@
   bindRange('height','heightVal');
   bindRange('flangeH','flangeHVal', v => Number(v).toFixed(3));
   bindRange('flangeOut','flangeOutVal');
+  bindRange('bottomWall','bottomWallVal', v => Number(v).toFixed(1));
+  bindRange('cuttingWallH','cuttingWallHVal');
   bindRange('thr','thrVal');
   bindRange('simp','simpVal', v => Number(v).toFixed(4));
   bindRange('smooth','smoothVal', v => Number(v).toFixed(1));
@@ -629,6 +642,8 @@
     fd.append('total_h_mm', $('height').value);
     fd.append('flange_h_mm', $('flangeH').value);
     fd.append('flange_out_mm', $('flangeOut').value);
+    fd.append('bottom_wall_mm', $('bottomWall').value);
+    fd.append('cutting_wall_h_mm', $('cuttingWallH').value);
     fd.append('cleanup_mm', $('cleanup').value);
     fd.append('tip_smooth_mm', $('tipSmooth').value);
     fd.append('keep_holes', $('keepHoles').checked);
