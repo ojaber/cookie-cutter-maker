@@ -189,12 +189,19 @@ def lattice_to_cookie_cutter_stl(
         wall_face = unary_union(
             [seg.buffer(wall_mm / 2, cap_style=2, join_style=2) for seg in segments]
         )
-        flange_ring = unary_union(
+        web = unary_union(
             [
                 seg.buffer(wall_mm / 2 + flange_out_mm, cap_style=2, join_style=2)
                 for seg in segments
             ]
         )
+        # The boundary line shelves use flat caps, so they leave the outer
+        # corner squares unfilled. Union a full perimeter shelf ring to fill
+        # those corners cleanly before any rounding.
+        outer_shelf = outer.buffer(wall_mm / 2 + flange_out_mm, join_style=2).difference(
+            outer.buffer(wall_mm / 2, join_style=2)
+        )
+        flange_ring = unary_union([web, outer_shelf])
         # Round only the outer perimeter corners; clip the webbed union to a
         # rounded outer mask so internal cell junctions stay intact.
         if flange_corner_radius_mm > 0:
