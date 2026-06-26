@@ -53,7 +53,7 @@ def _create_lattice_chamfer(
 
     for step in range(chamfer_steps + 1):
         t = step / chamfer_steps
-        z = base_z - (chamfer_depth * t)
+        z = base_z + (chamfer_depth * t)
         # Interpolate between inner and outer rings
         interpolated = inner_ring * (1 - t) + outer_ring * t
         rings.append((interpolated, z))
@@ -200,7 +200,7 @@ def lattice_to_cookie_cutter_stl(
             # Add chamfer between flange and body if requested
             if flange_chamfer_mm > 0:
                 chamfer = _create_lattice_chamfer(
-                    outer, flange_outer, total_h_mm, flange_chamfer_mm
+                    outer, flange_outer, 0.0, flange_chamfer_mm
                 )
                 body = trimesh.util.concatenate([body, chamfer, flange])
             else:
