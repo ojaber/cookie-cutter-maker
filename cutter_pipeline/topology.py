@@ -31,7 +31,7 @@ def lattice_signals(binary: np.ndarray) -> dict:
         mean_area = float(np.mean(bbox_areas))
         if mean_area > 0:
             area_cv = float(np.std(bbox_areas) / mean_area)
-            similar_loops = area_cv < 0.15
+            similar_loops = area_cv < 0.3
 
     lattice_ok = False
     lattice_cols = None
@@ -73,10 +73,14 @@ def grid_hint(binary: np.ndarray, resolved: Topology) -> str | None:
     if resolved != "single":
         return None
     stats = lattice_signals(binary)
-    if stats["n_components"] == 1 and stats["similar_loops"] and stats["contour_count"] >= 4:
+    # Suggest grid mode if: single connected component AND multiple contours
+    # Even if lattice extraction failed, the pattern suggests a grid
+    if stats["n_components"] == 1 and stats["contour_count"] >= 4:
         cols = stats["lattice_cols"]
         rows = stats["lattice_rows"]
         if cols and rows:
             return f"Detected a {cols}×{rows} cell grid — try Grid / lattice mode."
-        return "Detected similar cell loops — try Grid / lattice mode."
+        if stats["similar_loops"]:
+            return "Detected similar cell loops — try Grid / lattice mode."
+        return "Multiple contours detected — try Grid / lattice mode if this is a grid."
     return None
