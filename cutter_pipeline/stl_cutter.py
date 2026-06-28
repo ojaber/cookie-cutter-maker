@@ -9,6 +9,30 @@ from shapely.geometry.polygon import orient
 MIN_BEVEL_TOP_WALL_MM = 0.45
 
 
+def _union_solids(meshes: list) -> "trimesh.Trimesh | None":
+    """Boolean-union a list of watertight primitive solids into one manifold
+    mesh. Each input must be a closed (watertight) solid; the result is a single
+    watertight, manifold ``Trimesh`` suitable for 3D printing.
+
+    Falls back to a plain concatenation if the boolean backend is unavailable or
+    fails, so STL generation never hard-crashes.
+    """
+    solids = [m for m in meshes if m is not None and len(m.faces) > 0]
+    if not solids:
+        return None
+    if len(solids) == 1:
+        return solids[0]
+    try:
+        result = trimesh.boolean.union(solids)
+    except Exception:
+        result = trimesh.util.concatenate(solids)
+        result.merge_vertices()
+        return result
+    if isinstance(result, trimesh.Scene):
+        result = trimesh.util.concatenate(result.dump())
+    return result
+
+
 def _round_corners(poly, r: float):
     """Round the convex (outer) corners of a polygon by radius ``r`` using a
     morphological opening (erode then dilate with round joins).
@@ -260,7 +284,7 @@ def polygon_to_cookie_cutter_stl(
         return m.submesh([keep], append=True)
 
     body = drop_caps(body)
-    flange = drop_caps(flange)
+    # Don't drop caps from flange - it needs its top surface
 
     # Add a solid chamfer brace at the wall-to-flange junction if requested.
     parts_to_join = [body, flange]
@@ -272,8 +296,7 @@ def polygon_to_cookie_cutter_stl(
         chamfer = _create_chamfer(scaled, flange_h_mm, chamfer_h, chamfer_out)
         if chamfer is not None:
             parts_to_join.append(chamfer)
-    mesh = trimesh.util.concatenate(parts_to_join)
-    mesh.merge_vertices()
+    mesh = _union_solids(parts_to_join)
 
     # Fix normals and enforce outward-facing winding so slicers don't see the mesh inside-out
     if not mesh.is_winding_consistent:
