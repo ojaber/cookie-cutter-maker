@@ -1,7 +1,8 @@
-# Cookie Cutter Maker (PNG/SVG -> STL) + Local UI (Docker)
+# Cookie Cutter Maker (PNG/SVG/STL -> STL) + Local UI (Docker)
 
 This repo generates cookie cutter STL files from:
-- **an outline PNG** (offline/local; no OpenAI cost), and optionally
+- **an outline PNG** (offline/local; no OpenAI cost),
+- **an STL file** (3D model projected to 2D outline), or
 - **a text prompt** (outline PNG via OpenAI Images API if you set `OPENAI_API_KEY`).
 
 It includes:
@@ -35,8 +36,15 @@ MIT License © seaburr
 
 ## Offline flow (recommended)
 
+### From PNG
 1. Create or download a **simple black shape on white background** PNG outline.
 2. Upload it in the UI.
+3. Adjust sliders (wall, flange size, height, smoothing).
+4. Download STL.
+
+### From STL
+1. Upload an **STL file** (3D model) in the UI using the "STL Upload" tab.
+2. The STL is projected along the Z-axis (top-down view) to extract a 2D outline.
 3. Adjust sliders (wall, flange size, height, smoothing).
 4. Download STL.
 
@@ -114,6 +122,18 @@ PNG input:
 ```bash
 python -m cutter_pipeline.cli --png examples/pajama_outline.png --outdir output --name pajama
 python -m cutter_pipeline.cli --png ~/Downloads/3-4.png --topology auto --outdir output --name grid
+```
+
+STL input:
+
+```bash
+python -m cutter_pipeline.cli --stl examples/dino.stl --outdir output --name dino_cutter
+```
+
+Prompt input:
+
+```bash
+python -m cutter_pipeline.cli --prompt "a heart shape silhouette" --outdir output --name heart
 ```
 
 ## Test / smoke test

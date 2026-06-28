@@ -33,6 +33,7 @@ _PILImage.MAX_IMAGE_PIXELS = 25_000_000
 from cutter_pipeline.trace_outline import trace_png_to_polygon
 from cutter_pipeline.stl_dispatch import generate_stl_from_trace
 from cutter_pipeline.trace_meta import load_trace_result, save_trace_result
+from cutter_pipeline.stl_extractor import extract_outline_from_stl
 from shapely.geometry import shape, mapping
 import trimesh
 import zipfile
@@ -211,6 +212,24 @@ def _verify_image_bytes(content: bytes) -> None:
     except Exception:
         raise HTTPException(status_code=400, detail="Uploaded file is not a valid image.")
 
+
+def _verify_stl_bytes(content: bytes) -> None:
+    """Confirm the upload is a valid STL file before we run the pipeline on it."""
+    try:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".stl", delete=True) as tmp:
+            tmp.write(content)
+            tmp.flush()
+            mesh = trimesh.load(tmp.name, force="mesh")
+            if not hasattr(mesh, "vertices") or len(mesh.vertices) == 0:
+                raise HTTPException(status_code=400, detail="STL file is empty or invalid.")
+            if not hasattr(mesh, "faces") or len(mesh.faces) == 0:
+                raise HTTPException(status_code=400, detail="STL file has no faces.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Uploaded file is not a valid STL.")
+
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -376,6 +395,27 @@ def _find_png(job_dir: Path, name: str) -> Path:
     raise HTTPException(status_code=404, detail="PNG not found for this job. Upload or generate first.")
 
 
+def _find_stl(job_dir: Path, name: str) -> Path:
+    candidate = job_dir / f"{name}.stl"
+    if candidate.exists():
+        return candidate
+    candidate = job_dir / f"{name}_input.stl"
+    if candidate.exists():
+        return candidate
+    matches = list(job_dir.glob("*.stl"))
+    if matches:
+        for match in matches:
+            if not match.name.endswith(".stl"):
+                continue
+            if not match.name == f"{name}.stl":
+                continue
+            return match
+    matches = list(job_dir.glob("*_input.stl"))
+    if matches:
+        return matches[0]
+    raise HTTPException(status_code=404, detail="STL not found for this job. Upload first.")
+
+
 def _log_image_upload(filename: str, content: bytes, path: Path) -> None:
     try:
         with _PILImage.open(path) as img:
@@ -437,6 +477,46 @@ async def trace_from_png(
         "job_id": job_dir.name,
         "svg": f"/files/{job_dir.name}/{name}.svg",
         "png": f"/files/{job_dir.name}/{name}.png",
+        "extraction_mode": traced.extraction_mode,
+        **_topology_fields(traced),
+    }
+    if traced.extraction_warning:
+        result["warning"] = traced.extraction_warning
+    return result
+
+
+@app.post("/trace/from-stl")
+async def trace_from_stl(
+    file: UploadFile = File(...),
+    name: str = Form("outline"),
+    simplify: float = Form(0.002),
+    topology: str = Form("auto"),
+):
+    name = _safe_name(name)
+    if not (file.filename or "").lower().endswith(".stl"):
+        raise HTTPException(status_code=400, detail="Upload an STL file")
+
+    content = await _read_upload(file)
+    _verify_stl_bytes(content)
+
+    job_dir = _new_job_dir()
+    stl_path = job_dir / f"{name}.stl"
+    svg_path = job_dir / f"{name}.svg"
+
+    stl_path.write_bytes(content)
+    _log.info("STL upload — file=%r size=%.1fKB", file.filename, len(content) / 1024)
+    traced = extract_outline_from_stl(
+        str(stl_path),
+        str(svg_path),
+        simplify_epsilon=simplify,
+        topology=topology,
+    )
+    _persist_trace(job_dir, traced)
+
+    result = {
+        "job_id": job_dir.name,
+        "svg": f"/files/{job_dir.name}/{name}.svg",
+        "source_stl": f"/files/{job_dir.name}/{name}.stl",
         "extraction_mode": traced.extraction_mode,
         **_topology_fields(traced),
     }
@@ -519,6 +599,85 @@ async def pipeline_from_png(
     result = {
         "job_id": job_dir.name,
         "png": f"/files/{job_dir.name}/{name}.png",
+        "svg": f"/files/{job_dir.name}/{name}.svg",
+        "stl": f"/files/{job_dir.name}/{name}.stl",
+        "zip": f"/files/{job_dir.name}/{zip_path.name}",
+        "extraction_mode": traced.extraction_mode,
+        **_topology_fields(traced),
+    }
+    if stl_meta.get("height_mm") is not None:
+        result["height_mm"] = stl_meta["height_mm"]
+    if traced.extraction_warning:
+        result["warning"] = traced.extraction_warning
+    return result
+
+
+@app.post("/pipeline/from-stl")
+async def pipeline_from_stl(
+    file: UploadFile = File(...),
+    name: str = Form("cookie_cutter"),
+    width_mm: float = Form(95.0),
+    wall_mm: float = Form(1.4),
+    total_h_mm: float = Form(15.0),
+    flange_h_mm: float = Form(3.5),
+    flange_out_mm: float = Form(2.5),
+    flange_chamfer_mm: float = Form(0.5),
+    flange_all_lines: bool = Form(False),
+    flange_corner_radius_mm: float = Form(1.5),
+    bottom_wall_mm: float = Form(0.1),
+    cutting_wall_h_mm: float = Form(2.0),
+    cleanup_mm: float = Form(0.5),
+    tip_smooth_mm: float = Form(0.6),
+    keep_holes: bool = Form(False),
+    min_component_area_mm2: float = Form(25.0),
+    simplify: float = Form(0.002),
+    topology: str = Form("auto"),
+):
+    name = _safe_name(name)
+    if not (file.filename or "").lower().endswith(".stl"):
+        raise HTTPException(status_code=400, detail="Upload an STL file")
+
+    content = await _read_upload(file)
+    _verify_stl_bytes(content)
+
+    job_dir = _new_job_dir()
+    stl_input_path = job_dir / f"{name}_input.stl"
+    svg_path = job_dir / f"{name}.svg"
+    stl_path = job_dir / f"{name}.stl"
+
+    stl_input_path.write_bytes(content)
+    _log.info("STL upload (pipeline) — file=%r size=%.1fKB", file.filename, len(content) / 1024)
+    traced = extract_outline_from_stl(
+        str(stl_input_path),
+        str(svg_path),
+        simplify_epsilon=simplify,
+        topology=topology,
+    )
+    _persist_trace(job_dir, traced)
+
+    stl_meta = generate_stl_from_trace(
+        traced,
+        str(stl_path),
+        target_width_mm=width_mm,
+        wall_mm=wall_mm,
+        total_h_mm=total_h_mm,
+        flange_h_mm=flange_h_mm,
+        flange_out_mm=flange_out_mm,
+        flange_chamfer_mm=flange_chamfer_mm,
+        flange_all_lines=flange_all_lines,
+        flange_corner_radius_mm=flange_corner_radius_mm,
+        bottom_wall_mm=bottom_wall_mm,
+        cutting_wall_h_mm=cutting_wall_h_mm,
+        cleanup_mm=cleanup_mm,
+        tip_smooth_mm=tip_smooth_mm,
+        drop_holes=not keep_holes,
+        min_component_area_mm2=min_component_area_mm2,
+    )
+
+    zip_path = _write_zip(job_dir, [stl_input_path, svg_path, stl_path, job_dir / "trace_meta.json"], base_name=name)
+
+    result = {
+        "job_id": job_dir.name,
         "svg": f"/files/{job_dir.name}/{name}.svg",
         "stl": f"/files/{job_dir.name}/{name}.stl",
         "zip": f"/files/{job_dir.name}/{zip_path.name}",
@@ -696,28 +855,43 @@ async def trace_from_job(
     if not job_dir.exists():
         raise HTTPException(status_code=404, detail="job_id not found")
 
-    png_path = _find_png(job_dir, name)
-    svg_path = job_dir / f"{Path(png_path).stem}.svg"
+    svg_path = job_dir / f"{name}.svg"
 
-    traced = trace_png_to_polygon(
-        str(png_path),
-        str(svg_path),
-        threshold=threshold,
-        simplify_epsilon=simplify,
-        smooth_radius=smooth_radius,
-        extraction_mode=extraction_mode,
-        delta_e_threshold=delta_e_threshold,
-        topology=topology,
-    )
+    # Check if this is an STL job or a PNG job
+    try:
+        stl_path = _find_stl(job_dir, name)
+        traced = extract_outline_from_stl(
+            str(stl_path),
+            str(svg_path),
+            simplify_epsilon=simplify,
+            topology=topology,
+        )
+    except HTTPException:
+        # Not an STL job, try PNG
+        png_path = _find_png(job_dir, name)
+        traced = trace_png_to_polygon(
+            str(png_path),
+            str(svg_path),
+            threshold=threshold,
+            simplify_epsilon=simplify,
+            smooth_radius=smooth_radius,
+            extraction_mode=extraction_mode,
+            delta_e_threshold=delta_e_threshold,
+            topology=topology,
+        )
     _persist_trace(job_dir, traced)
 
     result = {
         "job_id": job_dir.name,
-        "png": f"/files/{job_dir.name}/{png_path.name}",
         "svg": f"/files/{job_dir.name}/{svg_path.name}",
         "extraction_mode": traced.extraction_mode,
         **_topology_fields(traced),
     }
+    # Include PNG or STL path depending on job type
+    if 'png_path' in locals():
+        result["png"] = f"/files/{job_dir.name}/{png_path.name}"
+    if 'stl_path' in locals():
+        result["source_stl"] = f"/files/{job_dir.name}/{stl_path.name}"
     if traced.extraction_warning:
         result["warning"] = traced.extraction_warning
     return result

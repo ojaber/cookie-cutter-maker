@@ -140,15 +140,24 @@
 <main>
   <div class="card step-grid">
     <div>
-      <h2>Step 1: Upload an image or use a prompt</h2>
+      <h2>Step 1: Upload an image, STL, or use a prompt</h2>
       <div class="tabs">
         <button class="tab active" id="tabPng" type="button">Image Upload</button>
+        <button class="tab" id="tabStl" type="button">STL Upload</button>
         <button class="tab" id="tabPrompt" type="button">Prompt (optional)</button>
       </div>
 
       <div id="panePng">
         <label>Image — outline, illustration, or photo</label>
         <input id="file" class="short-input" type="file" accept=".png,.jpg,.jpeg" />
+      </div>
+
+      <div id="paneStl" style="display:none;">
+        <label>STL — 3D model file</label>
+        <input id="fileStl" class="short-input" type="file" accept=".stl" />
+        <div class="small" style="margin-top:6px;">
+          STL files are projected along the Z-axis (top-down view) to extract a 2D outline.
+        </div>
       </div>
 
       <div id="panePrompt" style="display:none;">
@@ -162,11 +171,11 @@
       <label>Name</label>
       <input id="name" class="short-input" type="text" value="cookie_cutter" />
 
-      <button id="btnStep1" class="secondary" type="button">Load image (upload or prompt)</button>
+      <button id="btnStep1" class="secondary" type="button">Load image or STL (upload or prompt)</button>
       <div id="step1Status" class="status"></div>
     </div>
     <div class="pane media">
-      <header>Image</header>
+      <header>Image / STL</header>
       <div class="content">
         <div id="pngPreview" class="small">Step 1 will show your uploaded or generated image.</div>
       </div>
@@ -504,8 +513,10 @@
 
   // Tabs
   const tabPng = $('tabPng');
+  const tabStl = $('tabStl');
   const tabPrompt = $('tabPrompt');
   const panePng = $('panePng');
+  const paneStl = $('paneStl');
   const panePrompt = $('panePrompt');
   let mode = 'png';
   let lastJobId = null;
@@ -513,13 +524,18 @@
 
   tabPng.onclick = () => {
     mode = 'png';
-    tabPng.classList.add('active'); tabPrompt.classList.remove('active');
-    panePng.style.display = ''; panePrompt.style.display = 'none';
+    tabPng.classList.add('active'); tabStl.classList.remove('active'); tabPrompt.classList.remove('active');
+    panePng.style.display = ''; paneStl.style.display = 'none'; panePrompt.style.display = 'none';
+  };
+  tabStl.onclick = () => {
+    mode = 'stl';
+    tabStl.classList.add('active'); tabPng.classList.remove('active'); tabPrompt.classList.remove('active');
+    paneStl.style.display = ''; panePng.style.display = 'none'; panePrompt.style.display = 'none';
   };
   tabPrompt.onclick = () => {
     mode = 'prompt';
-    tabPrompt.classList.add('active'); tabPng.classList.remove('active');
-    panePrompt.style.display = ''; panePng.style.display = 'none';
+    tabPrompt.classList.add('active'); tabPng.classList.remove('active'); tabStl.classList.remove('active');
+    panePrompt.style.display = ''; panePng.style.display = 'none'; paneStl.style.display = 'none';
   };
 
   function setStatus(msg) { $('status').textContent = msg; }
@@ -528,6 +544,7 @@
     dashed:    { label: 'dashed',     title: 'Dashed/dotted outline — gaps bridged automatically' },
     simple_bg: { label: 'photo · bg', title: 'Uniform background detected — colour-distance extraction' },
     complex:   { label: 'photo · ai', title: 'Complex background — rembg (local) or graph-cut fallback' },
+    stl:       { label: 'stl',        title: 'STL file — Z-axis projection to extract 2D outline' },
   };
 
   function setLatticeUi(isLattice, cols, rows, heightMm) {
@@ -615,6 +632,9 @@
       lastPngUrl = obj.png;
       $('pngPreview').innerHTML = `<img src="${obj.png}" alt="PNG preview">`;
     }
+    if ((obj?.source_stl || obj?.stl) && !obj?.png) {
+      $('pngPreview').innerHTML = '<div class="small">STL loaded. Preview is shown in the STL Preview pane below.</div>';
+    }
     if (obj?.svg) {
       $('svgPreview').innerHTML = `<iframe src="${obj.svg}" aria-label="SVG preview"></iframe>`;
     }
@@ -696,10 +716,10 @@
 
   $('btnStep1').onclick = async () => {
     try {
-      setStatus('Loading image...');
-      setStepStatus('Loading image...', 'info');
+      setStatus('Loading image or STL...');
+      setStepStatus('Loading image or STL...', 'info');
       setLinks(null);
-      $('pngPreview').innerHTML = '<span class="small">Loading image...</span>';
+      $('pngPreview').innerHTML = '<span class="small">Loading...</span>';
       $('svgPreview').innerHTML = '<span class="small">Tracing...</span>';
 
       if (mode === 'png') {
@@ -717,6 +737,23 @@
         setStepStatus('Outline loaded.', 'success', data.extraction_mode, data.warning || '');
         applyTopologyResponse(data);
         setLinks(data);
+        if (data.svg) {
+          $('svgPreview').innerHTML = `<iframe src="${data.svg}" aria-label="SVG preview"></iframe>`;
+        }
+      } else if (mode === 'stl') {
+        const f = $('fileStl').files[0];
+        if (!f) throw new Error('Choose an STL file first.');
+        const fd = new FormData();
+        fd.append('file', f);
+        fd.append('name', $('name').value || 'cookie_cutter');
+        fd.append('simplify', $('simp').value);
+        traceParams(fd);
+        const data = await postForm('/trace/from-stl', fd);
+        setStatus('STL outline extracted.');
+        setStepStatus('STL outline extracted.', 'success', data.extraction_mode, data.warning || '');
+        applyTopologyResponse(data);
+        setLinks(data);
+        $('pngPreview').innerHTML = '<div class="small">STL loaded. Preview is shown in the STL Preview pane below.</div>';
         if (data.svg) {
           $('svgPreview').innerHTML = `<iframe src="${data.svg}" aria-label="SVG preview"></iframe>`;
         }
@@ -761,6 +798,7 @@
       updatePreviews(data);
     } catch (e) {
       setStatus(e.message || 'Request failed');
+      setStepStatus(e.message || 'Request failed', 'error');
       $('svgPreview').textContent = 'Trace failed.';
     }
   };

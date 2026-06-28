@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from cutter_pipeline.outline_openai import generate_outline_png
 from cutter_pipeline.stl_dispatch import generate_stl_from_trace
 from cutter_pipeline.trace_outline import trace_png_to_polygon
+from cutter_pipeline.stl_extractor import extract_outline_from_stl
 
 def main():
     load_dotenv()
@@ -12,6 +13,7 @@ def main():
     p = argparse.ArgumentParser(description="Outline -> Trace -> Cookie Cutter STL pipeline")
     p.add_argument("--prompt", help="Text prompt for outline generation (optional)")
     p.add_argument("--png", help="Existing outline PNG path (optional)")
+    p.add_argument("--stl", help="Existing STL file path (optional)")
     p.add_argument("--outdir", default="output")
     p.add_argument("--name", default="cookie_cutter")
     p.add_argument(
@@ -43,23 +45,32 @@ def main():
     args = p.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
-    if not args.png and not args.prompt:
-        raise SystemExit("Provide either --png OR --prompt")
-
-    png_path = args.png
-    if args.prompt and not png_path:
-        png_path = os.path.join(args.outdir, f"{args.name}.png")
-        generate_outline_png(args.prompt, png_path)
+    if not args.png and not args.prompt and not args.stl:
+        raise SystemExit("Provide either --png, --prompt, or --stl")
 
     svg_path = os.path.join(args.outdir, f"{args.name}.svg")
-    traced = trace_png_to_polygon(
-        png_path,
-        svg_path,
-        threshold=args.threshold,
-        simplify_epsilon=args.simplify,
-        smooth_radius=args.smooth_radius,
-        topology=args.topology,
-    )
+    
+    if args.stl:
+        traced = extract_outline_from_stl(
+            args.stl,
+            svg_path,
+            simplify_epsilon=args.simplify,
+            topology=args.topology,
+        )
+    else:
+        png_path = args.png
+        if args.prompt and not png_path:
+            png_path = os.path.join(args.outdir, f"{args.name}.png")
+            generate_outline_png(args.prompt, png_path)
+
+        traced = trace_png_to_polygon(
+            png_path,
+            svg_path,
+            threshold=args.threshold,
+            simplify_epsilon=args.simplify,
+            smooth_radius=args.smooth_radius,
+            topology=args.topology,
+        )
 
     stl_path = os.path.join(args.outdir, f"{args.name}.stl")
     generate_stl_from_trace(
