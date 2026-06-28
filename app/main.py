@@ -230,6 +230,25 @@ def _verify_stl_bytes(content: bytes) -> None:
     except Exception:
         raise HTTPException(status_code=400, detail="Uploaded file is not a valid STL.")
 
+
+def _measure_stl_xy_mm(stl_path: Path) -> tuple[float, float]:
+    mesh = trimesh.load(str(stl_path), force="mesh")
+    if not hasattr(mesh, "vertices") or len(mesh.vertices) == 0:
+        raise ValueError("STL file is empty or invalid.")
+    vertices_2d = mesh.vertices[:, :2]
+    mins = vertices_2d.min(axis=0)
+    maxs = vertices_2d.max(axis=0)
+    return float(maxs[0] - mins[0]), float(maxs[1] - mins[1])
+
+
+def _add_stl_size_fields(result: dict[str, Any], stl_path: Path) -> None:
+    try:
+        source_width_mm, source_height_mm = _measure_stl_xy_mm(stl_path)
+    except Exception:
+        return
+    result["source_width_mm"] = source_width_mm
+    result["source_height_mm"] = source_height_mm
+
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -520,6 +539,7 @@ async def trace_from_stl(
         "extraction_mode": traced.extraction_mode,
         **_topology_fields(traced),
     }
+    _add_stl_size_fields(result, stl_path)
     if traced.extraction_warning:
         result["warning"] = traced.extraction_warning
     return result
@@ -684,6 +704,7 @@ async def pipeline_from_stl(
         "extraction_mode": traced.extraction_mode,
         **_topology_fields(traced),
     }
+    _add_stl_size_fields(result, stl_input_path)
     if stl_meta.get("height_mm") is not None:
         result["height_mm"] = stl_meta["height_mm"]
     if traced.extraction_warning:
@@ -892,6 +913,7 @@ async def trace_from_job(
         result["png"] = f"/files/{job_dir.name}/{png_path.name}"
     if 'stl_path' in locals():
         result["source_stl"] = f"/files/{job_dir.name}/{stl_path.name}"
+        _add_stl_size_fields(result, stl_path)
     if traced.extraction_warning:
         result["warning"] = traced.extraction_warning
     return result

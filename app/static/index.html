@@ -262,7 +262,7 @@
         <div class="row">
           <div>
             <label><span id="widthLabel">Width (mm)</span>: <span id="widthVal">95</span> <span id="widthTip" class="tip" data-tip="Overall cutter width across its widest point.">?</span></label>
-            <input id="width" type="range" min="40" max="300" value="95" step="1"/>
+            <input id="width" type="range" min="40" max="600" value="95" step="1"/>
             <div id="gridHeightNote" class="small" style="margin-top:4px;display:none;color:#9fb0c2;"></div>
           </div>
           <div>
@@ -438,6 +438,30 @@
     });
   }
 
+  function fitCameraToObject(obj) {
+    if (!obj || !camera || !controls || !renderer) return;
+    const box = new THREE.Box3().setFromObject(obj);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const aspect = camera.aspect || 1;
+    const vFov = THREE.MathUtils.degToRad(camera.fov);
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+    const fitHeight = (size.y / 2) / Math.tan(vFov / 2);
+    const fitWidth = (size.x / 2) / Math.tan(hFov / 2);
+    const fitDepth = size.z * 0.8;
+    const fitSphere = sphere.radius / Math.sin(Math.min(vFov, hFov) / 2);
+    const distance = Math.max(fitHeight, fitWidth, fitDepth, fitSphere) * 1.2;
+    const direction = new THREE.Vector3(1, 1, 1).normalize();
+
+    controls.target.copy(center);
+    camera.position.copy(center).add(direction.multiplyScalar(distance));
+    camera.near = Math.max(0.1, distance / 100);
+    camera.far = Math.max(1000, distance * 10);
+    camera.updateProjectionMatrix();
+    controls.update();
+  }
+
   window.loadStl = async (url) => {
     try {
       const status = document.getElementById('stlStatus');
@@ -460,16 +484,9 @@
         scene.add(stlMesh);
 
         const box = new THREE.Box3().setFromObject(stlMesh);
-        const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
         stlMesh.position.sub(center);
-        stlMesh.position.y += size.y / 2;
-        const maxDim = Math.max(size.x, size.y, size.z);
-        const camDist = maxDim * 1.6;
-        camera.position.set(camDist, camDist, camDist);
-        camera.lookAt(0,0,0);
-        controls.target.set(0,0,0);
-        controls.update();
+        fitCameraToObject(stlMesh);
 
         const status = document.getElementById('stlStatus');
         if (status) status.textContent = 'Drag to orbit • Scroll to zoom';
@@ -521,6 +538,11 @@
   let mode = 'png';
   let lastJobId = null;
   let lastPngUrl = null;
+  let stlWidthAutoLocked = false;
+
+  $('width').addEventListener('input', () => {
+    if (mode === 'stl') stlWidthAutoLocked = true;
+  });
 
   tabPng.onclick = () => {
     mode = 'png';
@@ -529,6 +551,7 @@
   };
   tabStl.onclick = () => {
     mode = 'stl';
+    stlWidthAutoLocked = false;
     tabStl.classList.add('active'); tabPng.classList.remove('active'); tabPrompt.classList.remove('active');
     paneStl.style.display = ''; panePng.style.display = 'none'; panePrompt.style.display = 'none';
   };
@@ -605,9 +628,26 @@
     el.textContent = `⚠ ${msg}`;
   }
 
+  function applyDetectedStlWidth(data) {
+    if (mode !== 'stl') return;
+    const width = Number(data?.source_width_mm);
+    if (!Number.isFinite(width) || width <= 0) return;
+    const widthEl = $('width');
+    const rounded = Math.max(40, Math.round(width));
+    const current = Number(widthEl.value || 0);
+    const currentMax = Number(widthEl.max || 300);
+    const nextMax = Math.max(currentMax, Math.ceil(rounded / 25) * 25);
+    if (nextMax !== currentMax) widthEl.max = String(nextMax);
+    if (!stlWidthAutoLocked || current === 95 || current === 0) {
+      widthEl.value = String(rounded);
+      $('widthVal').textContent = String(rounded);
+    }
+  }
+
   function applyTopologyResponse(data) {
     const isLattice = data && data.topology === 'lattice';
     setLatticeUi(isLattice, data?.cols, data?.rows, data?.height_mm);
+    applyDetectedStlWidth(data);
     setTopologyBadge(data);
     setGridHint(data?.grid_hint || '');
   }
