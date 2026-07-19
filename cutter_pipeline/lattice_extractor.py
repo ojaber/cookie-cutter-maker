@@ -26,7 +26,7 @@ class LatticeDetectionError(ValueError):
     """Raised when a regular grid cannot be extracted from the foreground mask."""
 
 
-def _peak_positions(proj: np.ndarray, min_peaks: int, peak_frac: float = 0.2) -> list[float]:
+def _peak_positions(proj: np.ndarray, peak_frac: float = 0.2) -> list[float]:
     if proj.size == 0 or proj.max() <= 0:
         return []
     thresh = float(proj.max()) * peak_frac
@@ -41,10 +41,7 @@ def _peak_positions(proj: np.ndarray, min_peaks: int, peak_frac: float = 0.2) ->
         else:
             clusters.append([int(x)])
 
-    centers = [float(np.mean(c)) for c in clusters]
-    if len(centers) < min_peaks:
-        return centers
-    return centers
+    return [float(np.mean(c)) for c in clusters]
 
 
 def _spacing_is_regular(positions: list[float], max_cv: float = 0.3) -> bool:
@@ -72,8 +69,8 @@ def extract_lattice_from_mask(binary: np.ndarray) -> LatticeGeometry:
     col_proj = binary.sum(axis=0).astype(float)
     row_proj = binary.sum(axis=1).astype(float)
 
-    x_lines = _peak_positions(col_proj, min_peaks=2)
-    y_lines = _peak_positions(row_proj, min_peaks=2)
+    x_lines = _peak_positions(col_proj)
+    y_lines = _peak_positions(row_proj)
 
     if len(x_lines) < 2 or len(y_lines) < 2:
         raise LatticeDetectionError(
