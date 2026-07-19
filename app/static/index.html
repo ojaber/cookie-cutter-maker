@@ -407,7 +407,22 @@
 <script>
   // Lightweight STL viewer via Three.js + STLLoader.
   // Tries local copies in /static first; falls back to CDN if not present.
-  let renderer, scene, camera, controls, stlMesh;
+  let renderer, scene, camera, controls, stlMesh, floorGrid;
+
+  // (Re)build the floor grid sized to the model so large cutters don't
+  // overhang the "print bed". 20 mm squares, minimum 160 mm bed.
+  function setFloorGrid(modelSizeMm) {
+    const target = Math.max(160, Math.ceil((modelSizeMm * 1.25) / 50) * 50);
+    if (floorGrid && floorGrid.userData.sizeMm === target) return;
+    if (floorGrid) {
+      scene.remove(floorGrid);
+      floorGrid.geometry.dispose();
+      floorGrid.material.dispose();
+    }
+    floorGrid = new THREE.GridHelper(target, Math.round(target / 20), 0x334155, 0x1e293b);
+    floorGrid.userData.sizeMm = target;
+    scene.add(floorGrid);
+  }
   async function ensureThree() {
     if (window.THREE && window.STLLoader && window.OrbitControls) return;
     const localLibs = [
@@ -461,9 +476,7 @@
     dir.position.set(60, 80, 100);
     scene.add(dir);
 
-    const grid = new THREE.GridHelper(160, 8, 0x334155, 0x1e293b);
-    grid.position.y = 0;
-    scene.add(grid);
+    setFloorGrid(160);
 
     const animate = () => {
       requestAnimationFrame(animate);
@@ -529,7 +542,14 @@
 
         const box = new THREE.Box3().setFromObject(stlMesh);
         const center = box.getCenter(new THREE.Vector3());
-        stlMesh.position.sub(center);
+        const size = box.getSize(new THREE.Vector3());
+        // Center horizontally but rest the model ON the floor grid like a
+        // print bed — the exported STL has its base at z=0, so sinking its
+        // middle through the floor misrepresents the part.
+        stlMesh.position.x -= center.x;
+        stlMesh.position.z -= center.z;
+        stlMesh.position.y -= box.min.y;
+        setFloorGrid(Math.max(size.x, size.z));
         fitCameraToObject(stlMesh);
 
         const status = document.getElementById('stlStatus');
