@@ -15,7 +15,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Run tests
+        env:
+          REMBG_ENABLED: "false"
+        run: python -m pytest -q
       - name: Smoke test (PNG -> SVG -> STL)
         run: |
           python -m cutter_pipeline.cli --png examples/pajama_outline.png --outdir output --name ci_smoke
           test -f output/ci_smoke.stl
+      - name: Smoke test (Grid Builder -> STL)
+        run: |
+          python -m cutter_pipeline.cli --grid 3x4 --cell-mm 30 --outdir output --name ci_grid_smoke
+          test -f output/ci_grid_smoke.stl

@@ -112,6 +112,8 @@ def lattice_to_cookie_cutter_stl(
     cutting_wall_h_mm: float = None,
 ) -> str:
     wall_mm = max(wall_mm, MIN_WALL_MM)
+    # A flange taller than the cutter would float above the walls.
+    flange_h_mm = max(0.0, min(flange_h_mm, total_h_mm))
 
     min_x, min_y, max_x, max_y = lattice.bounds
     grid_w_px = max_x - min_x

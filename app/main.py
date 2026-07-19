@@ -1,14 +1,18 @@
 import asyncio
+import contextlib
+import functools
 import hashlib
 import hmac
 import os
 import re
 import secrets
+import shutil
 import sys
 import uuid
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 from pathlib import Path
 
@@ -31,6 +35,7 @@ from PIL import Image as _PILImage
 # enough for a cookie-cutter outline.
 _PILImage.MAX_IMAGE_PIXELS = 25_000_000
 from cutter_pipeline.trace_outline import trace_png_to_polygon
+from cutter_pipeline.grid_spec import build_grid_trace, grid_size_mm
 from cutter_pipeline.stl_dispatch import generate_stl_from_trace
 from cutter_pipeline.trace_meta import load_trace_result, save_trace_result
 from cutter_pipeline.stl_extractor import extract_outline_from_stl
@@ -126,10 +131,61 @@ _log.info(
     "enabled" if ACCESS_PASSWORD else "disabled (ACCESS_PASSWORD not set)",
 )
 
-app = FastAPI(title="Cookie Cutter Maker", version="0.2.0")
-
 OUTPUT_DIR = Path(os.environ.get("PIPELINE_OUTPUT_DIR", "output")).resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Delete job directories older than this many hours so the disk doesn't fill
+# up on long-running deployments. 0 disables cleanup.
+JOB_TTL_HOURS = float(os.environ.get("JOB_TTL_HOURS", "24"))
+_SWEEP_INTERVAL_SECONDS = 1800
+
+
+def _sweep_old_jobs() -> int:
+    """Remove expired job directories. Returns the number removed."""
+    cutoff = time.time() - JOB_TTL_HOURS * 3600
+    removed = 0
+    for entry in OUTPUT_DIR.iterdir():
+        try:
+            if not entry.is_dir() or not _JOB_ID_RE.match(entry.name):
+                continue
+            if entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+async def _sweep_old_jobs_forever() -> None:
+    while True:
+        try:
+            removed = await anyio.to_thread.run_sync(_sweep_old_jobs)
+            if removed:
+                _log.info("Job cleanup — removed %d expired job dir(s).", removed)
+        except Exception:
+            _log.exception("Job cleanup sweep failed")
+        await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    sweeper = None
+    if JOB_TTL_HOURS > 0:
+        sweeper = asyncio.create_task(_sweep_old_jobs_forever())
+    yield
+    if sweeper is not None:
+        sweeper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweeper
+
+
+app = FastAPI(title="Cookie Cutter Maker", version="0.2.0", lifespan=_lifespan)
+
+
+async def _run(func, *args, **kwargs):
+    """Run blocking pipeline work on a worker thread so the event loop stays
+    responsive (health checks, other requests) during heavy tracing/meshing."""
+    return await anyio.to_thread.run_sync(functools.partial(func, *args, **kwargs))
 
 # Reject uploads larger than this to avoid disk/memory exhaustion.
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
@@ -241,9 +297,9 @@ def _measure_stl_xy_mm(stl_path: Path) -> tuple[float, float]:
     return float(maxs[0] - mins[0]), float(maxs[1] - mins[1])
 
 
-def _add_stl_size_fields(result: dict[str, Any], stl_path: Path) -> None:
+async def _add_stl_size_fields(result: dict[str, Any], stl_path: Path) -> None:
     try:
-        source_width_mm, source_height_mm = _measure_stl_xy_mm(stl_path)
+        source_width_mm, source_height_mm = await _run(_measure_stl_xy_mm, stl_path)
     except Exception:
         return
     result["source_width_mm"] = source_width_mm
@@ -397,7 +453,20 @@ def _topology_fields(traced) -> dict[str, Any]:
     }
     if traced.grid_hint:
         fields["grid_hint"] = traced.grid_hint
+    if traced.grid_spec:
+        grid_w, grid_h = grid_size_mm(traced.grid_spec)
+        fields["grid_spec"] = traced.grid_spec
+        fields["grid_width_mm"] = grid_w
+        fields["grid_height_mm"] = grid_h
     return fields
+
+
+def _grid_target_width_mm(traced, width_mm: float) -> float:
+    """Grid Builder jobs have exact millimetre geometry — ignore the generic
+    width parameter so the requested cell sizes are honored precisely."""
+    if traced.grid_spec:
+        return grid_size_mm(traced.grid_spec)[0]
+    return width_mm
 
 
 def _persist_trace(job_dir: Path, traced) -> None:
@@ -414,22 +483,14 @@ def _find_png(job_dir: Path, name: str) -> Path:
     raise HTTPException(status_code=404, detail="PNG not found for this job. Upload or generate first.")
 
 
-def _find_stl(job_dir: Path, name: str) -> Path:
-    candidate = job_dir / f"{name}.stl"
-    if candidate.exists():
-        return candidate
+def _find_source_stl(job_dir: Path, name: str) -> Path:
+    """Locate the *uploaded* STL for a job. Only ``*_input.stl`` files count:
+    ``{name}.stl`` is the generated cutter, and re-tracing that would feed the
+    output back in as input."""
     candidate = job_dir / f"{name}_input.stl"
     if candidate.exists():
         return candidate
-    matches = list(job_dir.glob("*.stl"))
-    if matches:
-        for match in matches:
-            if not match.name.endswith(".stl"):
-                continue
-            if not match.name == f"{name}.stl":
-                continue
-            return match
-    matches = list(job_dir.glob("*_input.stl"))
+    matches = sorted(job_dir.glob("*_input.stl"))
     if matches:
         return matches[0]
     raise HTTPException(status_code=404, detail="STL not found for this job. Upload first.")
@@ -480,7 +541,8 @@ async def trace_from_png(
 
     png_path.write_bytes(content)
     _log_image_upload(file.filename, content, png_path)
-    traced = trace_png_to_polygon(
+    traced = await _run(
+        trace_png_to_polygon,
         str(png_path),
         str(svg_path),
         threshold=threshold,
@@ -516,15 +578,18 @@ async def trace_from_stl(
         raise HTTPException(status_code=400, detail="Upload an STL file")
 
     content = await _read_upload(file)
-    _verify_stl_bytes(content)
+    await _run(_verify_stl_bytes, content)
 
     job_dir = _new_job_dir()
-    stl_path = job_dir / f"{name}.stl"
+    # Keep the uploaded source separate from the generated cutter ("{name}.stl")
+    # so generating an STL never overwrites the model the user uploaded.
+    stl_path = job_dir / f"{name}_input.stl"
     svg_path = job_dir / f"{name}.svg"
 
     stl_path.write_bytes(content)
     _log.info("STL upload — file=%r size=%.1fKB", file.filename, len(content) / 1024)
-    traced = extract_outline_from_stl(
+    traced = await _run(
+        extract_outline_from_stl,
         str(stl_path),
         str(svg_path),
         simplify_epsilon=simplify,
@@ -535,11 +600,11 @@ async def trace_from_stl(
     result = {
         "job_id": job_dir.name,
         "svg": f"/files/{job_dir.name}/{name}.svg",
-        "source_stl": f"/files/{job_dir.name}/{name}.stl",
+        "source_stl": f"/files/{job_dir.name}/{stl_path.name}",
         "extraction_mode": traced.extraction_mode,
         **_topology_fields(traced),
     }
-    _add_stl_size_fields(result, stl_path)
+    await _add_stl_size_fields(result, stl_path)
     if traced.extraction_warning:
         result["warning"] = traced.extraction_warning
     return result
@@ -583,7 +648,8 @@ async def pipeline_from_png(
 
     png_path.write_bytes(content)
     _log_image_upload(file.filename, content, png_path)
-    traced = trace_png_to_polygon(
+    traced = await _run(
+        trace_png_to_polygon,
         str(png_path),
         str(svg_path),
         threshold=threshold,
@@ -595,7 +661,8 @@ async def pipeline_from_png(
     )
     _persist_trace(job_dir, traced)
 
-    stl_meta = generate_stl_from_trace(
+    stl_meta = await _run(
+        generate_stl_from_trace,
         traced,
         str(stl_path),
         target_width_mm=width_mm,
@@ -658,7 +725,7 @@ async def pipeline_from_stl(
         raise HTTPException(status_code=400, detail="Upload an STL file")
 
     content = await _read_upload(file)
-    _verify_stl_bytes(content)
+    await _run(_verify_stl_bytes, content)
 
     job_dir = _new_job_dir()
     stl_input_path = job_dir / f"{name}_input.stl"
@@ -667,7 +734,8 @@ async def pipeline_from_stl(
 
     stl_input_path.write_bytes(content)
     _log.info("STL upload (pipeline) — file=%r size=%.1fKB", file.filename, len(content) / 1024)
-    traced = extract_outline_from_stl(
+    traced = await _run(
+        extract_outline_from_stl,
         str(stl_input_path),
         str(svg_path),
         simplify_epsilon=simplify,
@@ -675,7 +743,8 @@ async def pipeline_from_stl(
     )
     _persist_trace(job_dir, traced)
 
-    stl_meta = generate_stl_from_trace(
+    stl_meta = await _run(
+        generate_stl_from_trace,
         traced,
         str(stl_path),
         target_width_mm=width_mm,
@@ -704,7 +773,7 @@ async def pipeline_from_stl(
         "extraction_mode": traced.extraction_mode,
         **_topology_fields(traced),
     }
-    _add_stl_size_fields(result, stl_input_path)
+    await _add_stl_size_fields(result, stl_input_path)
     if stl_meta.get("height_mm") is not None:
         result["height_mm"] = stl_meta["height_mm"]
     if traced.extraction_warning:
@@ -763,7 +832,8 @@ async def pipeline_from_prompt(
     finally:
         OPENAI_INFLIGHT.dec()
 
-    traced = trace_png_to_polygon(
+    traced = await _run(
+        trace_png_to_polygon,
         str(png_path),
         str(svg_path),
         smooth_radius=smooth_radius,
@@ -773,7 +843,8 @@ async def pipeline_from_prompt(
     (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     _persist_trace(job_dir, traced)
 
-    generate_stl_from_trace(
+    await _run(
+        generate_stl_from_trace,
         traced,
         str(stl_path),
         target_width_mm=width_mm,
@@ -844,7 +915,8 @@ async def outline_from_prompt(
     finally:
         OPENAI_INFLIGHT.dec()
 
-    traced = trace_png_to_polygon(
+    traced = await _run(
+        trace_png_to_polygon,
         str(png_path),
         str(svg_path),
         smooth_radius=smooth_radius,
@@ -859,6 +931,111 @@ async def outline_from_prompt(
         "svg": f"/files/{job_dir.name}/{name}.svg",
         **_topology_fields(traced),
     }
+
+@app.post("/trace/from-grid")
+async def trace_from_grid(
+    name: str = Form("cookie_cutter"),
+    cols: int = Form(...),
+    rows: int = Form(...),
+    cell_w_mm: float = Form(...),
+    cell_h_mm: float = Form(0.0),
+):
+    """Grid Builder: create a lattice trace from explicit grid dimensions —
+    no image or STL upload required. Cell sizes are exact millimetres,
+    measured between wall centerlines. Pass cell_h_mm=0 for square cells."""
+    name = _safe_name(name)
+    job_dir = _new_job_dir()
+    svg_path = job_dir / f"{name}.svg"
+
+    _log.info(
+        "Grid Builder — %dx%d cells of %.1fx%.1f mm",
+        cols, rows, cell_w_mm, cell_h_mm or cell_w_mm,
+    )
+    traced = await _run(
+        build_grid_trace,
+        cols,
+        rows,
+        cell_w_mm,
+        cell_h_mm if cell_h_mm > 0 else None,
+        str(svg_path),
+    )
+    _persist_trace(job_dir, traced)
+
+    return {
+        "job_id": job_dir.name,
+        "svg": f"/files/{job_dir.name}/{name}.svg",
+        "extraction_mode": traced.extraction_mode,
+        **_topology_fields(traced),
+    }
+
+
+@app.post("/pipeline/from-grid")
+async def pipeline_from_grid(
+    name: str = Form("cookie_cutter"),
+    cols: int = Form(...),
+    rows: int = Form(...),
+    cell_w_mm: float = Form(...),
+    cell_h_mm: float = Form(0.0),
+    wall_mm: float = Form(1.4),
+    total_h_mm: float = Form(15.0),
+    flange_h_mm: float = Form(3.5),
+    flange_out_mm: float = Form(2.5),
+    flange_chamfer_mm: float = Form(0.5),
+    flange_all_lines: bool = Form(False),
+    flange_corner_radius_mm: float = Form(1.5),
+    bottom_wall_mm: float = Form(0.1),
+    cutting_wall_h_mm: float = Form(2.0),
+):
+    """One-shot Grid Builder: grid spec straight to STL (plus SVG and zip)."""
+    name = _safe_name(name)
+    job_dir = _new_job_dir()
+    svg_path = job_dir / f"{name}.svg"
+    stl_path = job_dir / f"{name}.stl"
+
+    _log.info(
+        "Grid Builder (pipeline) — %dx%d cells of %.1fx%.1f mm",
+        cols, rows, cell_w_mm, cell_h_mm or cell_w_mm,
+    )
+    traced = await _run(
+        build_grid_trace,
+        cols,
+        rows,
+        cell_w_mm,
+        cell_h_mm if cell_h_mm > 0 else None,
+        str(svg_path),
+    )
+    _persist_trace(job_dir, traced)
+
+    stl_meta = await _run(
+        generate_stl_from_trace,
+        traced,
+        str(stl_path),
+        target_width_mm=_grid_target_width_mm(traced, 0.0),
+        wall_mm=wall_mm,
+        total_h_mm=total_h_mm,
+        flange_h_mm=flange_h_mm,
+        flange_out_mm=flange_out_mm,
+        flange_chamfer_mm=flange_chamfer_mm,
+        flange_all_lines=flange_all_lines,
+        flange_corner_radius_mm=flange_corner_radius_mm,
+        bottom_wall_mm=bottom_wall_mm,
+        cutting_wall_h_mm=cutting_wall_h_mm,
+    )
+
+    zip_path = _write_zip(job_dir, [svg_path, stl_path, job_dir / "trace_meta.json"], base_name=name)
+
+    result = {
+        "job_id": job_dir.name,
+        "svg": f"/files/{job_dir.name}/{name}.svg",
+        "stl": f"/files/{job_dir.name}/{name}.stl",
+        "zip": f"/files/{job_dir.name}/{zip_path.name}",
+        "extraction_mode": traced.extraction_mode,
+        **_topology_fields(traced),
+    }
+    if stl_meta.get("height_mm") is not None:
+        result["height_mm"] = stl_meta["height_mm"]
+    return result
+
 
 @app.post("/trace/from-job")
 async def trace_from_job(
@@ -878,19 +1055,22 @@ async def trace_from_job(
 
     svg_path = job_dir / f"{name}.svg"
 
-    # Check if this is an STL job or a PNG job
+    # Determine the job's source. Check the PNG first: PNG jobs gain a
+    # "{name}.stl" once the cutter is generated, and re-tracing that output
+    # would feed the generated mesh back in as input.
+    png_path: Path | None = None
+    stl_path: Path | None = None
     try:
-        stl_path = _find_stl(job_dir, name)
-        traced = extract_outline_from_stl(
-            str(stl_path),
-            str(svg_path),
-            simplify_epsilon=simplify,
-            topology=topology,
-        )
-    except HTTPException:
-        # Not an STL job, try PNG
         png_path = _find_png(job_dir, name)
-        traced = trace_png_to_polygon(
+    except HTTPException:
+        try:
+            stl_path = _find_source_stl(job_dir, name)
+        except HTTPException:
+            pass
+
+    if png_path is not None:
+        traced = await _run(
+            trace_png_to_polygon,
             str(png_path),
             str(svg_path),
             threshold=threshold,
@@ -900,6 +1080,28 @@ async def trace_from_job(
             delta_e_threshold=delta_e_threshold,
             topology=topology,
         )
+    elif stl_path is not None:
+        traced = await _run(
+            extract_outline_from_stl,
+            str(stl_path),
+            str(svg_path),
+            simplify_epsilon=simplify,
+            topology=topology,
+        )
+    else:
+        # No re-traceable source (e.g. a Grid Builder job) — return the stored
+        # trace, which is already exact.
+        try:
+            traced = load_trace_result(job_dir)
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="No source image or STL found for this job. Run Step 1 again.",
+            )
+        if not svg_path.exists():
+            existing = sorted(job_dir.glob("*.svg"))
+            if existing:
+                svg_path = existing[0]
     _persist_trace(job_dir, traced)
 
     result = {
@@ -909,11 +1111,11 @@ async def trace_from_job(
         **_topology_fields(traced),
     }
     # Include PNG or STL path depending on job type
-    if 'png_path' in locals():
+    if png_path is not None:
         result["png"] = f"/files/{job_dir.name}/{png_path.name}"
-    if 'stl_path' in locals():
+    if stl_path is not None:
         result["source_stl"] = f"/files/{job_dir.name}/{stl_path.name}"
-        _add_stl_size_fields(result, stl_path)
+        await _add_stl_size_fields(result, stl_path)
     if traced.extraction_warning:
         result["warning"] = traced.extraction_warning
     return result
@@ -948,10 +1150,11 @@ async def stl_from_job(
         raise HTTPException(status_code=404, detail="Trace data for this job not found. Trace or upload again.")
     stl_path = job_dir / f"{name}.stl"
 
-    stl_meta = generate_stl_from_trace(
+    stl_meta = await _run(
+        generate_stl_from_trace,
         traced,
         str(stl_path),
-        target_width_mm=width_mm,
+        target_width_mm=_grid_target_width_mm(traced, width_mm),
         wall_mm=wall_mm,
         total_h_mm=total_h_mm,
         flange_h_mm=flange_h_mm,

@@ -40,6 +40,8 @@ def trace_result_to_dict(traced: TraceResult) -> dict[str, Any]:
         "extraction_mode": traced.extraction_mode,
         "extraction_warning": traced.extraction_warning,
     }
+    if traced.grid_spec is not None:
+        payload["grid_spec"] = traced.grid_spec
     if traced.polygon is not None:
         payload["polygon"] = mapping(traced.polygon)
     if traced.lattice is not None:
@@ -64,6 +66,7 @@ def trace_result_from_dict(data: dict[str, Any]) -> TraceResult:
         svg_file=data.get("svg_file", ""),
         extraction_mode=data.get("extraction_mode", "binary"),
         extraction_warning=data.get("extraction_warning", ""),
+        grid_spec=data.get("grid_spec"),
     )
 
 

@@ -135,6 +135,8 @@ def polygon_to_cookie_cutter_stl(
     if w <= 0:
         raise ValueError("Invalid polygon bounds")
     wall_mm = max(wall_mm, MIN_BEVEL_TOP_WALL_MM)
+    # A flange taller than the cutter would float above the walls.
+    flange_h_mm = max(0.0, min(flange_h_mm, total_h_mm))
     scale = target_width_mm / w
 
     scaled = Polygon([(x * scale, y * scale) for x, y in poly.exterior.coords]).buffer(0)

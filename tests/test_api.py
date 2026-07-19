@@ -275,6 +275,164 @@ def test_pipeline_then_stl_from_job(client):
     assert stl.status_code == 200
 
 
+# ── Grid Builder ──────────────────────────────────────────────────────────────
+
+def test_trace_from_grid_builds_lattice_job(client):
+    r = client.post(
+        "/trace/from-grid",
+        data={"name": "grid", "cols": "3", "rows": "4", "cell_w_mm": "30", "cell_h_mm": "25"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["topology"] == "lattice"
+    assert body["cols"] == 3
+    assert body["rows"] == 4
+    assert body["extraction_mode"] == "grid"
+    assert body["grid_width_mm"] == pytest.approx(90.0)
+    assert body["grid_height_mm"] == pytest.approx(100.0)
+    svg = client.get(body["svg"])
+    assert svg.status_code == 200
+    assert svg.text.count("<line") == 4 + 5
+
+
+def test_trace_from_grid_square_cells_by_default(client):
+    r = client.post(
+        "/trace/from-grid",
+        data={"cols": "2", "rows": "2", "cell_w_mm": "40"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["grid_width_mm"] == pytest.approx(80.0)
+    assert body["grid_height_mm"] == pytest.approx(80.0)
+
+
+def test_trace_from_grid_rejects_invalid_spec(client):
+    r = client.post(
+        "/trace/from-grid",
+        data={"cols": "0", "rows": "4", "cell_w_mm": "30"},
+    )
+    assert r.status_code == 400
+    r = client.post(
+        "/trace/from-grid",
+        data={"cols": "3", "rows": "4", "cell_w_mm": "1000"},
+    )
+    assert r.status_code == 400
+
+
+def test_grid_job_stl_honors_exact_cell_size(client):
+    """stl/from-job must ignore width_mm for Grid Builder jobs so the
+    requested cell sizes are exact."""
+    import trimesh
+
+    r = client.post(
+        "/trace/from-grid",
+        data={"name": "grid", "cols": "3", "rows": "2", "cell_w_mm": "30"},
+    )
+    job_id = r.json()["job_id"]
+
+    r2 = client.post(
+        "/stl/from-job",
+        # width_mm deliberately wrong — must not rescale the grid.
+        data={"job_id": job_id, "name": "grid", "width_mm": "200", "flange_out_mm": "2.5"},
+    )
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["grid_width_mm"] == pytest.approx(90.0)
+    assert body["height_mm"] == pytest.approx(60.0)
+
+    out_root = Path(client.app_module.OUTPUT_DIR)
+    mesh = trimesh.load(out_root / job_id / "grid.stl", force="mesh")
+    extent_x = mesh.vertices[:, 0].max() - mesh.vertices[:, 0].min()
+    assert extent_x == pytest.approx(90.0 + 2 * 2.5, abs=0.2)
+
+
+def test_pipeline_from_grid_one_shot(client):
+    r = client.post(
+        "/pipeline/from-grid",
+        data={"name": "grid", "cols": "2", "rows": "3", "cell_w_mm": "25"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["topology"] == "lattice"
+    assert body["grid_width_mm"] == pytest.approx(50.0)
+    stl = client.get(body["stl"])
+    assert stl.status_code == 200
+    assert len(stl.content) > 100
+    zip_resp = client.get(body["zip"])
+    assert zip_resp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as zf:
+        assert {"grid.svg", "grid.stl", "trace_meta.json"} <= set(zf.namelist())
+
+
+def test_grid_job_trace_from_job_returns_stored_trace(client):
+    """Grid jobs have no PNG/STL source; re-trace must not 404 or garbage."""
+    r = client.post(
+        "/trace/from-grid",
+        data={"name": "grid", "cols": "3", "rows": "4", "cell_w_mm": "30"},
+    )
+    job_id = r.json()["job_id"]
+    r2 = client.post("/trace/from-job", data={"job_id": job_id, "name": "grid"})
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["topology"] == "lattice"
+    assert body["cols"] == 3
+    assert body["extraction_mode"] == "grid"
+
+
+# ── Source preservation regressions ───────────────────────────────────────────
+
+def _make_box_stl() -> bytes:
+    import trimesh
+
+    return trimesh.creation.box(extents=(30, 20, 10)).export(file_type="stl")
+
+
+def test_stl_source_survives_generation(client):
+    """Generating a cutter must not overwrite the uploaded source STL, and a
+    re-trace afterwards must still trace the original upload."""
+    stl_bytes = _make_box_stl()
+    r = client.post(
+        "/trace/from-stl",
+        data={"name": "cookie_cutter"},
+        files={"file": ("box.stl", stl_bytes, "model/stl")},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    job_id = body["job_id"]
+    assert body["source_width_mm"] == pytest.approx(30.0, abs=0.1)
+    assert "_input.stl" in body["source_stl"]
+
+    source_path = Path(client.app_module.OUTPUT_DIR) / job_id / "cookie_cutter_input.stl"
+    size_before = source_path.stat().st_size
+
+    r2 = client.post("/stl/from-job", data={"job_id": job_id, "width_mm": "60"})
+    assert r2.status_code == 200, r2.text
+    assert source_path.stat().st_size == size_before
+
+    r3 = client.post("/trace/from-job", data={"job_id": job_id})
+    assert r3.status_code == 200, r3.text
+    assert r3.json()["source_width_mm"] == pytest.approx(30.0, abs=0.1)
+
+
+def test_png_retrace_after_generation_still_traces_png(client):
+    """A PNG job gains a generated {name}.stl; re-trace must keep using the
+    PNG source, not the generated mesh."""
+    png = _make_outline_png()
+    r = client.post(
+        "/trace/from-png",
+        data={"name": "cookie_cutter"},
+        files={"file": ("a.png", png, "image/png")},
+    )
+    job_id = r.json()["job_id"]
+
+    r2 = client.post("/stl/from-job", data={"job_id": job_id, "width_mm": "60"})
+    assert r2.status_code == 200, r2.text
+
+    r3 = client.post("/trace/from-job", data={"job_id": job_id})
+    assert r3.status_code == 200, r3.text
+    assert r3.json()["extraction_mode"] == "binary"
+
+
 # ── Prompt endpoints when OPENAI_API_KEY is unset ─────────────────────────────
 
 def test_prompt_pipeline_requires_api_key(client, monkeypatch):

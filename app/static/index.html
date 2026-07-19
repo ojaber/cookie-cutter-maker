@@ -17,7 +17,8 @@
     .card { background: linear-gradient(145deg, #101a2b, #0c121a); border: 1px solid #22344b; border-radius: 16px; padding: 18px; box-shadow: 0 18px 46px rgba(0,0,0,0.42); }
     h2 { margin: 0 0 12px 0; font-size: 18px; font-weight:800; letter-spacing: 0.2px; }
     label { display:block; font-size: 12px; color:#9fb0c2; margin-top: 12px; margin-bottom:6px; letter-spacing: 0.1px; }
-    input[type="text"], textarea { width:100%; background:#0b0f14; border:1px solid #243244; color:#e6edf3; border-radius:12px; padding:12px; box-sizing:border-box; }
+    input[type="text"], input[type="number"], textarea { width:100%; background:#0b0f14; border:1px solid #243244; color:#e6edf3; border-radius:12px; padding:12px; box-sizing:border-box; }
+    input:disabled, select:disabled { opacity:.5; cursor:not-allowed; }
     .short-input { width:80%; max-width:420px; }
     input[type="file"] { width:100%; color:#e6edf3; background:#0b0f14; border:1px solid #243244; border-radius:12px; padding:12px; cursor:pointer; box-sizing:border-box; }
     input[type="file"]::file-selector-button { background:#223043; color:#e6edf3; border:0; border-radius:10px; padding:10px 14px; margin-right:12px; cursor:pointer; font-weight:700; }
@@ -90,8 +91,8 @@
     #stlStatus { font-size:12px; color:#9fb0c2; text-align:center; margin-top:auto; min-height:16px; display:flex; align-items:center; justify-content:center; width:100%; }
     .links a { color:#7ee787; text-decoration:none; display:block; margin-top:6px; }
     .small { font-size: 12px; color:#9fb0c2; line-height:1.4; }
-    .tabs { display:flex; gap:8px; margin-bottom: 10px; }
-    .tab { flex:1; padding:10px; border-radius:12px; border:1px solid #1f2a37; background:#0b0f14; color:#c9d1d9; cursor:pointer; font-weight:600; }
+    .tabs { display:flex; gap:8px; margin-bottom: 10px; flex-wrap:wrap; }
+    .tab { flex:1; min-width:96px; padding:10px 6px; border-radius:12px; border:1px solid #1f2a37; background:#0b0f14; color:#c9d1d9; cursor:pointer; font-weight:600; }
     .tab.active { background:#162235; border-color:#2b3b4f; color:#e6edf3;}
     .step-grid { display:grid; grid-template-columns: minmax(420px, 1.15fr) 460px 240px; gap:20px; align-items:start; }
     .step3-grid { grid-template-columns: 340px 1fr; align-items:stretch; }
@@ -129,7 +130,7 @@
 <header>
   <div>
     <div style="font-weight:900; font-size:20px;">Cookie Cutter Maker</div>
-    <div class="small">Upload and prompt → Trace → Generate STL</div>
+    <div class="small">Image, STL, prompt, or grid → Trace → Generate STL</div>
   </div>
   <div class="feature-bar" id="featureBar" style="visibility:hidden">
     <div class="feature"><span class="feature-dot" id="dotBgRemoval"></span>Background Removal</div>
@@ -140,11 +141,12 @@
 <main>
   <div class="card step-grid">
     <div>
-      <h2>Step 1: Upload an image, STL, or use a prompt</h2>
+      <h2>Step 1: Start from an image, STL, prompt, or grid</h2>
       <div class="tabs">
         <button class="tab active" id="tabPng" type="button">Image Upload</button>
         <button class="tab" id="tabStl" type="button">STL Upload</button>
-        <button class="tab" id="tabPrompt" type="button">Prompt (optional)</button>
+        <button class="tab" id="tabGrid" type="button">Grid Builder</button>
+        <button class="tab" id="tabPrompt" type="button" title="Generate an outline image from a text prompt (optional)">Prompt</button>
       </div>
 
       <div id="panePng">
@@ -160,10 +162,38 @@
         </div>
       </div>
 
+      <div id="paneGrid" style="display:none;">
+        <div class="row">
+          <div>
+            <label>Columns <span class="tip" data-tip="Number of cells across (1–40).">?</span></label>
+            <input id="gridCols" type="number" min="1" max="40" step="1" value="3" />
+          </div>
+          <div>
+            <label>Rows <span class="tip" data-tip="Number of cells down (1–40).">?</span></label>
+            <input id="gridRows" type="number" min="1" max="40" step="1" value="4" />
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Cell width (mm) <span class="tip" data-tip="Spacing between wall centerlines. Each opening is one wall thickness smaller.">?</span></label>
+            <input id="gridCellW" type="number" min="5" max="300" step="0.5" value="30" />
+          </div>
+          <div>
+            <label>Cell height (mm) <span class="tip" data-tip="Vertical spacing between wall centerlines. Match cell width for square cells.">?</span></label>
+            <input id="gridCellH" type="number" min="5" max="300" step="0.5" value="30" />
+          </div>
+        </div>
+        <div id="gridSummary" class="small" style="margin-top:8px;color:#93c5fd;"></div>
+        <div class="small" style="margin-top:6px;">
+          No image needed — build a divider grid (brownies, fudge, dough strips) by
+          choosing the cells directly. Sizes are exact millimetres.
+        </div>
+      </div>
+
       <div id="panePrompt" style="display:none;">
         <label>Prompt</label>
         <textarea id="prompt" rows="4" placeholder="e.g., a pajama shirt icon silhouette, single closed contour, simple outline"></textarea>
-        <div class="small" style="margin-top:6px;">
+        <div class="small" id="promptNote" style="margin-top:6px;">
           Requires <code>OPENAI_API_KEY</code> set in the container. Otherwise this endpoint will return an error.
         </div>
       </div>
@@ -171,13 +201,13 @@
       <label>Name</label>
       <input id="name" class="short-input" type="text" value="cookie_cutter" />
 
-      <button id="btnStep1" class="secondary" type="button">Load image or STL (upload or prompt)</button>
+      <button id="btnStep1" class="secondary" type="button">Upload &amp; trace image</button>
       <div id="step1Status" class="status"></div>
     </div>
     <div class="pane media">
-      <header>Image / STL</header>
+      <header>Source preview</header>
       <div class="content">
-        <div id="pngPreview" class="small">Step 1 will show your uploaded or generated image.</div>
+        <div id="pngPreview" class="small">Step 1 will show your uploaded image, STL, or grid here.</div>
       </div>
     </div>
     <div class="pane text">
@@ -197,9 +227,13 @@
             <td style="padding:6px 4px;color:#e6edf3;font-weight:700;">Photos</td>
             <td style="padding:6px 4px;color:#9fb0c2;">Any background. Uses local U2Net AI (no API key, runs offline).</td>
           </tr>
-          <tr>
+          <tr style="border-bottom:1px solid #1f2a37;">
             <td style="padding:6px 4px;color:#e6edf3;font-weight:700;">Grid &amp; lattice</td>
             <td style="padding:6px 4px;color:#9fb0c2;">Connected black grid lines with equal cells. Auto-detected or choose Grid mode.</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 4px;color:#e6edf3;font-weight:700;">Grid Builder</td>
+            <td style="padding:6px 4px;color:#9fb0c2;">No image at all — pick columns, rows and exact cell size in the Grid Builder tab.</td>
           </tr>
         </table>
         <p style="margin:10px 0 0 0;color:#9fb0c2;">Keep shapes simple and avoid thin lines for best print results.</p>
@@ -233,6 +267,9 @@
         </div>
       </div>
       <button id="btnTrace" class="secondary" type="button">Trace</button>
+      <div id="step2Note" class="small" style="display:none;margin-top:8px;color:#9fb0c2;">
+        Grid Builder jobs are exact geometry — adjust cells in Step 1 instead of re-tracing.
+      </div>
     </div>
     <div class="pane media">
       <header>Traced preview</header>
@@ -360,6 +397,11 @@
     document.getElementById('dotBgRemoval').className = 'feature-dot ' + (f.background_removal ? 'on' : 'off');
     document.getElementById('dotImgGen').className    = 'feature-dot ' + (f.image_generation   ? 'on' : 'off');
     document.getElementById('featureBar').style.visibility = 'visible';
+    if (!f.image_generation) {
+      document.getElementById('tabPrompt').style.opacity = '0.55';
+      document.getElementById('promptNote').textContent =
+        'Image generation is disabled on this server (no OPENAI_API_KEY). Use Image Upload, STL Upload, or Grid Builder instead.';
+    }
   }).catch(() => {});
 </script>
 <script>
@@ -373,10 +415,12 @@
       "/static/STLLoader.js",
       "/static/OrbitControls.js",
     ];
+    // r147 is the last release that ships the non-module examples/js builds;
+    // the r158 paths used previously do not exist on the CDN.
     const cdnLibs = [
-      "https://unpkg.com/three@0.158.0/build/three.min.js",
-      "https://unpkg.com/three@0.158.0/examples/js/loaders/STLLoader.js",
-      "https://unpkg.com/three@0.158.0/examples/js/controls/OrbitControls.js",
+      "https://unpkg.com/three@0.147.0/build/three.min.js",
+      "https://unpkg.com/three@0.147.0/examples/js/loaders/STLLoader.js",
+      "https://unpkg.com/three@0.147.0/examples/js/controls/OrbitControls.js",
     ];
     const tryLoad = (src) =>
       new Promise((resolve, reject) => {
@@ -503,6 +547,11 @@
   };
 
   const $ = (id) => document.getElementById(id);
+  // Escape dynamic text before inserting via innerHTML (server error strings etc).
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+  ));
+  const fmtMm = (v) => String(+Number(v).toFixed(1));
 
   function bindRange(id, outId, fmt=(v)=>v) {
     const el = $(id);
@@ -529,37 +578,82 @@
   bindRange('area','areaVal');
 
   // Tabs
-  const tabPng = $('tabPng');
-  const tabStl = $('tabStl');
-  const tabPrompt = $('tabPrompt');
-  const panePng = $('panePng');
-  const paneStl = $('paneStl');
-  const panePrompt = $('panePrompt');
+  const TABS = {
+    png:    { tab: $('tabPng'),    pane: $('panePng'),    label: 'Upload & trace image' },
+    stl:    { tab: $('tabStl'),    pane: $('paneStl'),    label: 'Upload & trace STL' },
+    grid:   { tab: $('tabGrid'),   pane: $('paneGrid'),   label: 'Build grid' },
+    prompt: { tab: $('tabPrompt'), pane: $('panePrompt'), label: 'Generate outline from prompt' },
+  };
   let mode = 'png';
   let lastJobId = null;
   let lastPngUrl = null;
   let stlWidthAutoLocked = false;
+  // Set when the current job came from the Grid Builder: {w, h} exact mm.
+  let gridSpecSize = null;
 
   $('width').addEventListener('input', () => {
     if (mode === 'stl') stlWidthAutoLocked = true;
   });
 
-  tabPng.onclick = () => {
-    mode = 'png';
-    tabPng.classList.add('active'); tabStl.classList.remove('active'); tabPrompt.classList.remove('active');
-    panePng.style.display = ''; paneStl.style.display = 'none'; panePrompt.style.display = 'none';
-  };
-  tabStl.onclick = () => {
-    mode = 'stl';
-    stlWidthAutoLocked = false;
-    tabStl.classList.add('active'); tabPng.classList.remove('active'); tabPrompt.classList.remove('active');
-    paneStl.style.display = ''; panePng.style.display = 'none'; panePrompt.style.display = 'none';
-  };
-  tabPrompt.onclick = () => {
-    mode = 'prompt';
-    tabPrompt.classList.add('active'); tabPng.classList.remove('active'); tabStl.classList.remove('active');
-    panePrompt.style.display = ''; panePng.style.display = 'none'; paneStl.style.display = 'none';
-  };
+  function setMode(m) {
+    mode = m;
+    for (const [key, t] of Object.entries(TABS)) {
+      t.tab.classList.toggle('active', key === m);
+      t.pane.style.display = key === m ? '' : 'none';
+    }
+    $('btnStep1').textContent = TABS[m].label;
+    if (m === 'stl') stlWidthAutoLocked = false;
+    if (m === 'grid') renderGridPreview();
+  }
+  for (const key of Object.keys(TABS)) TABS[key].tab.onclick = () => setMode(key);
+
+  // ── Grid Builder ────────────────────────────────────────────────────────────
+  function gridSpecFromInputs() {
+    const cols = parseInt($('gridCols').value, 10);
+    const rows = parseInt($('gridRows').value, 10);
+    const cw = parseFloat($('gridCellW').value);
+    const ch = parseFloat($('gridCellH').value);
+    if (![cols, rows, cw, ch].every(Number.isFinite)) return null;
+    if (cols < 1 || rows < 1 || cols > 40 || rows > 40 || cw < 5 || ch < 5 || cw > 300 || ch > 300) return null;
+    return { cols, rows, cw, ch };
+  }
+
+  function gridSvgMarkup(cols, rows, cw, ch) {
+    const W = cols * cw, H = rows * ch;
+    const pad = 0.05 * Math.max(W, H);
+    const sw = 0.008 * Math.max(W, H);
+    let lines = '';
+    for (let i = 0; i <= cols; i++) {
+      const x = i * cw;
+      lines += `<line x1="${x}" y1="0" x2="${x}" y2="${H}" stroke="#1f6feb" stroke-width="${sw}"/>`;
+    }
+    for (let j = 0; j <= rows; j++) {
+      const y = j * ch;
+      lines += `<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="#7ee787" stroke-width="${sw}"/>`;
+    }
+    return `<svg viewBox="${-pad} ${-pad} ${W + 2 * pad} ${H + 2 * pad}" style="width:100%;height:100%;" ` +
+      `xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Grid preview">` +
+      `<rect x="${-pad}" y="${-pad}" width="${W + 2 * pad}" height="${H + 2 * pad}" fill="white"/>${lines}</svg>`;
+  }
+
+  function renderGridPreview() {
+    const spec = gridSpecFromInputs();
+    const summary = $('gridSummary');
+    if (!spec) {
+      summary.textContent = 'Enter columns, rows, and cell sizes (5–300 mm, up to 40×40 cells).';
+      if (mode === 'grid') $('pngPreview').innerHTML = '<span class="small">Enter valid grid dimensions to preview.</span>';
+      return;
+    }
+    const W = spec.cols * spec.cw, H = spec.rows * spec.ch;
+    summary.textContent =
+      `${spec.cols}×${spec.rows} cells of ${fmtMm(spec.cw)}×${fmtMm(spec.ch)} mm — footprint ${fmtMm(W)} × ${fmtMm(H)} mm`;
+    if (mode !== 'grid') return;
+    $('pngPreview').innerHTML = gridSvgMarkup(spec.cols, spec.rows, spec.cw, spec.ch);
+  }
+  ['gridCols', 'gridRows', 'gridCellW', 'gridCellH'].forEach((id) =>
+    $(id).addEventListener('input', renderGridPreview)
+  );
+  renderGridPreview();
 
   function setStatus(msg) { $('status').textContent = msg; }
   const MODE_LABELS = {
@@ -568,6 +662,7 @@
     simple_bg: { label: 'photo · bg', title: 'Uniform background detected — colour-distance extraction' },
     complex:   { label: 'photo · ai', title: 'Complex background — rembg (local) or graph-cut fallback' },
     stl:       { label: 'stl',        title: 'STL file — Z-axis projection to extract 2D outline' },
+    grid:      { label: 'grid',       title: 'Grid Builder — exact dimensions, no image needed' },
   };
 
   function setLatticeUi(isLattice, cols, rows, heightMm) {
@@ -644,24 +739,47 @@
     }
   }
 
+  function setStep2Enabled(enabled) {
+    ['thr', 'simp', 'smooth', 'topology'].forEach((id) => { $(id).disabled = !enabled; });
+    $('btnTrace').disabled = !enabled;
+    $('step2Note').style.display = enabled ? 'none' : 'block';
+  }
+
+  function applyGridSpecUi() {
+    const widthEl = $('width');
+    if (gridSpecSize) {
+      widthEl.disabled = true;
+      const note = $('gridHeightNote');
+      note.style.display = 'block';
+      note.textContent = `Size fixed by cell settings: ${fmtMm(gridSpecSize.w)} × ${fmtMm(gridSpecSize.h)} mm`;
+    } else {
+      widthEl.disabled = false;
+    }
+  }
+
   function applyTopologyResponse(data) {
     const isLattice = data && data.topology === 'lattice';
+    const gw = Number(data?.grid_width_mm);
+    const gh = Number(data?.grid_height_mm);
+    gridSpecSize = Number.isFinite(gw) && Number.isFinite(gh) && gw > 0 ? { w: gw, h: gh } : null;
     setLatticeUi(isLattice, data?.cols, data?.rows, data?.height_mm);
     applyDetectedStlWidth(data);
     setTopologyBadge(data);
     setGridHint(data?.grid_hint || '');
+    applyGridSpecUi();
+    setStep2Enabled(!gridSpecSize);
   }
 
   function setStepStatus(msg, type='info', extractionMode='', warning='') {
     const el = $('step1Status');
     if (!el) return;
-    let html = msg ? `<span>${msg}</span>` : '';
+    let html = msg ? `<span>${esc(msg)}</span>` : '';
     if (extractionMode && MODE_LABELS[extractionMode]) {
       const m = MODE_LABELS[extractionMode];
-      html += ` <span style="display:inline-block;margin-left:8px;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;background:#162235;border:1px solid #2b3b4f;color:#93c5fd;" title="${m.title}">${m.label}</span>`;
+      html += ` <span style="display:inline-block;margin-left:8px;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;background:#162235;border:1px solid #2b3b4f;color:#93c5fd;" title="${esc(m.title)}">${esc(m.label)}</span>`;
     }
     if (warning) {
-      html += `<div style="margin-top:6px;color:#fcd34d;font-size:11px;">⚠ ${warning}</div>`;
+      html += `<div style="margin-top:6px;color:#fcd34d;font-size:11px;">⚠ ${esc(warning)}</div>`;
     }
     el.innerHTML = html || '';
     el.className = 'status ' + (msg ? type : '');
@@ -670,18 +788,32 @@
     console.log('updatePreviews payload:', obj);
     if (obj?.png) {
       lastPngUrl = obj.png;
-      $('pngPreview').innerHTML = `<img src="${obj.png}" alt="PNG preview">`;
+      $('pngPreview').innerHTML = `<img src="${esc(obj.png)}" alt="PNG preview">`;
     }
-    if ((obj?.source_stl || obj?.stl) && !obj?.png) {
-      $('pngPreview').innerHTML = '<div class="small">STL loaded. Preview is shown in the STL Preview pane below.</div>';
+    if (obj?.grid_spec) {
+      // Grid Builder job: the source is the grid itself — keep drawing it.
+      const s = obj.grid_spec;
+      $('pngPreview').innerHTML = gridSvgMarkup(s.cols, s.rows, s.cell_w_mm, s.cell_h_mm);
+    } else if ((obj?.source_stl || obj?.stl) && !obj?.png) {
+      $('pngPreview').innerHTML = '<div class="small">STL loaded — shown in the 3D preview below.</div>';
     }
     if (obj?.svg) {
-      $('svgPreview').innerHTML = `<iframe src="${obj.svg}" aria-label="SVG preview"></iframe>`;
+      $('svgPreview').innerHTML = `<iframe src="${esc(obj.svg)}" aria-label="SVG preview"></iframe>`;
     }
-    if (obj?.stl && typeof window.loadStl === 'function') {
-      window.loadStl(obj.stl);
+    // Prefer the generated cutter; fall back to the uploaded source STL so
+    // the 3D pane shows something right after an STL upload.
+    const stlUrl = obj?.stl || obj?.source_stl;
+    if (stlUrl && typeof window.loadStl === 'function') {
+      window.loadStl(stlUrl);
     }
   }
+  const LINK_LABELS = {
+    zip: 'Download All (zip)',
+    stl: 'Download STL',
+    svg: 'Download SVG',
+    png: 'Download PNG',
+    source_stl: 'Download Source STL',
+  };
   function setLinks(obj) {
     const links = $('links');
     links.innerHTML = '';
@@ -691,11 +823,7 @@
       if (typeof v === 'string' && v.startsWith('/files/')) {
         const a = document.createElement('a');
         a.href = v;
-        if (k.toLowerCase() === 'zip') {
-          a.textContent = 'Download All (zip)';
-        } else {
-          a.textContent = `Download ${k.toUpperCase()}`;
-        }
+        a.textContent = LINK_LABELS[k.toLowerCase()] || `Download ${k.toUpperCase()}`;
         a.target = '_blank';
         links.appendChild(a);
       }
@@ -713,14 +841,16 @@
     updatePreviews(obj);
   }
 
-  async function postForm(url, formData) {
+  // Photo extraction and large lattice meshing can legitimately take a couple
+  // of minutes on a small instance — keep the client timeout generous.
+  async function postForm(url, formData, timeoutMs = 120000) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res;
     try {
       res = await fetch(url, { method:'POST', body: formData, signal: controller.signal });
     } catch (e) {
-      if (e.name === 'AbortError') throw new Error('Request timed out after 30 s. The server may be overloaded or unavailable.');
+      if (e.name === 'AbortError') throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)} s. The server may be overloaded or unavailable.`);
       throw e;
     } finally {
       clearTimeout(timer);
@@ -728,7 +858,12 @@
     const text = await res.text();
     let data;
     try { data = JSON.parse(text); } catch(e) { data = { detail: text }; }
-    if (!res.ok) throw new Error(data.detail || 'Request failed');
+    if (!res.ok) {
+      let msg = data.detail || 'Request failed';
+      // FastAPI validation errors arrive as an array of {loc, msg, ...}.
+      if (Array.isArray(msg)) msg = msg.map((d) => d.msg || JSON.stringify(d)).join('; ');
+      throw new Error(msg);
+    }
     return data;
   }
 
@@ -738,7 +873,9 @@
 
   function stlParams(fd) {
     fd.append('name', $('name').value || 'cookie_cutter');
-    fd.append('width_mm', $('width').value);
+    // Grid Builder jobs use the exact grid width so cell sizes stay precise
+    // (the slider is disabled and only holds an integer approximation).
+    fd.append('width_mm', gridSpecSize ? gridSpecSize.w : $('width').value);
     fd.append('wall_mm', $('wall').value);
     fd.append('total_h_mm', $('height').value);
     fd.append('flange_h_mm', $('flangeH').value);
@@ -754,12 +891,26 @@
     fd.append('min_component_area_mm2', $('area').value);
   }
 
-  $('btnStep1').onclick = async () => {
+  // Disable a button while its request runs so double-clicks don't queue
+  // duplicate jobs on the server.
+  async function withBusy(btn, fn) {
+    const prevText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Working…';
     try {
-      setStatus('Loading image or STL...');
-      setStepStatus('Loading image or STL...', 'info');
+      await fn();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prevText;
+    }
+  }
+
+  $('btnStep1').onclick = () => withBusy($('btnStep1'), async () => {
+    try {
+      setStatus('Loading source...');
+      setStepStatus('Loading source...', 'info');
       setLinks(null);
-      $('pngPreview').innerHTML = '<span class="small">Loading...</span>';
+      if (mode !== 'grid') $('pngPreview').innerHTML = '<span class="small">Loading...</span>';
       $('svgPreview').innerHTML = '<span class="small">Tracing...</span>';
 
       if (mode === 'png') {
@@ -793,10 +944,27 @@
         setStepStatus('STL outline extracted.', 'success', data.extraction_mode, data.warning || '');
         applyTopologyResponse(data);
         setLinks(data);
-        $('pngPreview').innerHTML = '<div class="small">STL loaded. Preview is shown in the STL Preview pane below.</div>';
         if (data.svg) {
-          $('svgPreview').innerHTML = `<iframe src="${data.svg}" aria-label="SVG preview"></iframe>`;
+          $('svgPreview').innerHTML = `<iframe src="${esc(data.svg)}" aria-label="SVG preview"></iframe>`;
         }
+      } else if (mode === 'grid') {
+        const spec = gridSpecFromInputs();
+        if (!spec) throw new Error('Enter valid grid dimensions first (5–300 mm cells, up to 40×40).');
+        const fd = new FormData();
+        fd.append('name', $('name').value || 'cookie_cutter');
+        fd.append('cols', spec.cols);
+        fd.append('rows', spec.rows);
+        fd.append('cell_w_mm', spec.cw);
+        fd.append('cell_h_mm', spec.ch);
+        const data = await postForm('/trace/from-grid', fd);
+        setStatus('Grid built.');
+        setStepStatus(
+          `Grid built — ${data.cols}×${data.rows} cells, ${fmtMm(data.grid_width_mm)} × ${fmtMm(data.grid_height_mm)} mm.`,
+          'success', data.extraction_mode, ''
+        );
+        applyTopologyResponse(data);
+        setLinks(data);
+        renderGridPreview();
       } else {
         const prompt = $('prompt').value.trim();
         if (!prompt) throw new Error('Enter a prompt.');
@@ -806,6 +974,7 @@
         const data = await postForm('/outline/from-prompt', fd);
         setStatus('Outline generated from prompt.');
         setStepStatus('Outline generated from prompt.', 'success', data.extraction_mode || '', data.warning || '');
+        applyTopologyResponse(data);
         setLinks(data);
         updatePreviews(data);
       }
@@ -814,9 +983,9 @@
       setStepStatus(e.message || 'Request failed', 'error');
       $('svgPreview').textContent = 'Failed.';
     }
-  };
+  });
 
-  $('btnTrace').onclick = async () => {
+  $('btnTrace').onclick = () => withBusy($('btnTrace'), async () => {
     try {
       if (!lastJobId) throw new Error('Run Step 1 first to get a job_id.');
       setStatus('Re-tracing with current threshold/simplify...');
@@ -841,9 +1010,9 @@
       setStepStatus(e.message || 'Request failed', 'error');
       $('svgPreview').textContent = 'Trace failed.';
     }
-  };
+  });
 
-  $('btnRun').onclick = async () => {
+  $('btnRun').onclick = () => withBusy($('btnRun'), async () => {
     try {
       setStatus('Generating STL...');
       setLinks(null);
@@ -861,7 +1030,7 @@
     } catch (e) {
       setStatus(e.message || 'Request failed');
     }
-  };
+  });
 </script>
 </body>
 </html>

@@ -15,6 +15,10 @@ from cutter_pipeline.topology import Topology, TopologyMode, classify_topology, 
 
 TopologyParam = Literal["auto", "single", "lattice"]
 
+# ImageMode covers image-derived extraction; traces can also come from an STL
+# projection ("stl") or a manually specified grid ("grid").
+ExtractionMode = ImageMode | Literal["stl", "grid"]
+
 
 @dataclass
 class TraceResult:
@@ -29,8 +33,12 @@ class TraceResult:
     grid_hint: str | None
     svg_path: str
     svg_file: str
-    extraction_mode: ImageMode = "binary"
+    extraction_mode: ExtractionMode = "binary"
     extraction_warning: str = ""
+    # Set for Grid Builder jobs: {"cols", "rows", "cell_w_mm", "cell_h_mm"}.
+    # When present the lattice line positions are exact millimetres and the
+    # cutter must not be rescaled by target_width_mm.
+    grid_spec: dict | None = None
 
 
 def _svg_from_coords(coords: list[tuple[float, float]]) -> str:
@@ -74,7 +82,7 @@ def _write_single_svg(coords: list[tuple[float, float]], svg_out_path: Path) -> 
     return svg_path_d
 
 
-def _write_lattice_svg(lattice, w: int, h: int, svg_out_path: Path) -> str:
+def _write_lattice_svg(lattice, w: float, h: float, svg_out_path: Path) -> str:
     norm = float(max(w, h))
 
     def norm_pt(col: float, row: float) -> tuple[float, float]:
