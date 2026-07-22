@@ -22,6 +22,7 @@ Add selectable profiles:
 Hash the uploaded PNG + params -> reuse existing output.
 
 ## 5) Auth & rate limits (if you ever host)
-- user auth
-- quota controls
+- ~~passphrase auth~~ — done (`ACCESS_PASSWORD` + `SESSION_SECRET`)
+- ~~per-IP rate limiting + concurrency cap~~ — done (`RATE_LIMIT_PER_MINUTE`, `HEAVY_CONCURRENCY`)
+- per-user accounts / quotas (only if it ever needs multi-tenancy)
 - object storage for artifacts

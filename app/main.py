@@ -12,6 +12,7 @@ import uuid
 import json
 import logging
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from typing import Any
 from pathlib import Path
@@ -53,6 +54,18 @@ except Exception:
 
 _log = logging.getLogger(__name__)
 
+
+def _env_number(name: str, default: float, cast=int):
+    """Parse a numeric env var, tolerating unset/empty/garbage values."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return cast(default)
+    try:
+        return cast(raw)
+    except ValueError:
+        _log.warning("Ignoring invalid %s=%r — using default %s.", name, raw, default)
+        return cast(default)
+
 # ── Access control ─────────────────────────────────────────────────────────────
 # Auth is enabled only when ACCESS_PASSWORD is set. If not set, the app is open.
 
@@ -72,7 +85,7 @@ if ACCESS_PASSWORD:
             "multiple replicas. Set SESSION_SECRET for stable sessions."
         )
 
-_AUTH_EXEMPT = {"/login", "/logout", "/healthz", "/favicon.ico"}
+_AUTH_EXEMPT = {"/login", "/logout", "/healthz", "/favicon.ico", "/robots.txt"}
 
 def _make_session_token() -> str:
     nonce = secrets.token_hex(16)
@@ -95,25 +108,31 @@ def _login_page(error: str = "") -> str:
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Cookie Cutter Maker — Login</title>
+  <meta name="color-scheme" content="light dark"/>
   <link rel="icon" type="image/png" href="/favicon.ico"/>
   <style>
     *{{box-sizing:border-box;margin:0;padding:0}}
-    body{{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}}
-    .card{{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:2rem;width:100%;max-width:360px}}
+    :root{{--bg:#f7f4ee;--surface:#fff;--border:#e6e0d2;--text:#241f17;--muted:#5d5647;--accent:#b45309;--accent-hover:#94430a;--err:#b03030}}
+    @media (prefers-color-scheme: dark){{
+      :root{{--bg:#17130f;--surface:#211c16;--border:#373025;--text:#f1eadd;--muted:#b6ac9a;--accent:#e79552;--accent-hover:#f0a765;--err:#f28b82}}
+    }}
+    body{{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}}
+    .card{{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:2rem;width:100%;max-width:380px;box-shadow:0 10px 30px rgba(46,35,15,.08)}}
     h1{{font-size:1.25rem;margin-bottom:.25rem}}
-    .sub{{font-size:.85rem;color:#94a3b8;margin-bottom:1.5rem}}
-    label{{display:block;font-size:.85rem;color:#94a3b8;margin-bottom:.4rem}}
-    input[type=password]{{width:100%;padding:.6rem .75rem;background:#0f172a;border:1px solid #334155;border-radius:6px;color:#e2e8f0;font-size:1rem;margin-bottom:1rem}}
-    input[type=password]:focus{{outline:none;border-color:#6366f1}}
-    button{{width:100%;padding:.65rem;background:#6366f1;color:#fff;border:none;border-radius:6px;font-size:1rem;cursor:pointer}}
-    button:hover{{background:#4f46e5}}
-    .error{{color:#fca5a5;font-size:.85rem;margin-bottom:1rem}}
+    .sub{{font-size:.85rem;color:var(--muted);margin-bottom:1.5rem}}
+    label{{display:block;font-size:.85rem;font-weight:600;color:var(--muted);margin-bottom:.4rem}}
+    input[type=password]{{width:100%;padding:.65rem .75rem;background:var(--bg);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:1rem;margin-bottom:1rem}}
+    input[type=password]:focus{{outline:none;border-color:var(--accent)}}
+    button{{width:100%;padding:.7rem;background:var(--accent);color:#fff;border:none;border-radius:10px;font-size:1rem;font-weight:700;cursor:pointer}}
+    @media (prefers-color-scheme: dark){{button{{color:#271303}}}}
+    button:hover{{background:var(--accent-hover)}}
+    .error{{color:var(--err);font-size:.85rem;margin-bottom:1rem}}
   </style>
 </head>
 <body>
   <div class="card">
-    <h1>Cookie Cutter Maker</h1>
-    <p class="sub">Enter your passphrase to continue.</p>
+    <h1>🍪 Cookie Cutter Maker</h1>
+    <p class="sub">Enter the passphrase to continue.</p>
     {error_html}
     <form method="POST" action="/login">
       <label for="pw">Passphrase</label>
@@ -136,7 +155,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Delete job directories older than this many hours so the disk doesn't fill
 # up on long-running deployments. 0 disables cleanup.
-JOB_TTL_HOURS = float(os.environ.get("JOB_TTL_HOURS", "24"))
+JOB_TTL_HOURS = _env_number("JOB_TTL_HOURS", 24, cast=float)
 _SWEEP_INTERVAL_SECONDS = 1800
 
 
@@ -188,7 +207,60 @@ async def _run(func, *args, **kwargs):
     return await anyio.to_thread.run_sync(functools.partial(func, *args, **kwargs))
 
 # Reject uploads larger than this to avoid disk/memory exhaustion.
-MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
+MAX_UPLOAD_BYTES = _env_number("MAX_UPLOAD_BYTES", 20 * 1024 * 1024)
+
+# ── Public-instance guards ─────────────────────────────────────────────────────
+# Tracing and meshing are CPU/memory heavy; on a small public instance a burst
+# of requests (or a bot) can OOM the box. Two in-memory, per-process guards:
+#   * HEAVY_CONCURRENCY   — max pipeline jobs running at once (0 disables).
+#   * RATE_LIMIT_PER_MINUTE — max heavy POSTs per client IP per minute
+#     (0 disables).
+# Suitable for the default single-instance deployment; front with a real rate
+# limiter if you ever scale out.
+HEAVY_CONCURRENCY = _env_number("HEAVY_CONCURRENCY", 2)
+HEAVY_QUEUE_TIMEOUT_SECONDS = _env_number("HEAVY_QUEUE_TIMEOUT_SECONDS", 30, cast=float)
+RATE_LIMIT_PER_MINUTE = _env_number("RATE_LIMIT_PER_MINUTE", 20)
+
+_HEAVY_PATHS = {
+    "/trace/from-png",
+    "/trace/from-stl",
+    "/trace/from-grid",
+    "/trace/from-job",
+    "/stl/from-job",
+    "/pipeline/from-png",
+    "/pipeline/from-stl",
+    "/pipeline/from-grid",
+    "/pipeline/from-prompt",
+    "/outline/from-prompt",
+}
+
+_heavy_semaphore = asyncio.Semaphore(max(HEAVY_CONCURRENCY, 1))
+_RATE_WINDOW_SECONDS = 60.0
+_rate_buckets: dict[str, deque] = {}
+
+
+def _client_ip(request: Request) -> str:
+    # App Platform / most reverse proxies put the real client first in
+    # X-Forwarded-For. Fall back to the socket peer for direct connections.
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limited(ip: str) -> bool:
+    """Sliding-window rate check. Returns True when the request should be rejected."""
+    now = time.monotonic()
+    bucket = _rate_buckets.setdefault(ip, deque())
+    while bucket and now - bucket[0] > _RATE_WINDOW_SECONDS:
+        bucket.popleft()
+    if len(bucket) >= RATE_LIMIT_PER_MINUTE:
+        return True
+    bucket.append(now)
+    if len(_rate_buckets) > 5000:
+        for key in [k for k, b in _rate_buckets.items() if not b]:
+            del _rate_buckets[key]
+    return False
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
@@ -361,6 +433,33 @@ def metrics():
 
 
 @app.middleware("http")
+async def _public_guard_middleware(request: Request, call_next):
+    """Rate-limit and concurrency-cap the heavy pipeline endpoints."""
+    if request.method != "POST" or request.url.path not in _HEAVY_PATHS:
+        return await call_next(request)
+    if RATE_LIMIT_PER_MINUTE > 0 and _rate_limited(_client_ip(request)):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many requests — please wait a minute and try again."},
+            headers={"Retry-After": "60"},
+        )
+    if HEAVY_CONCURRENCY <= 0:
+        return await call_next(request)
+    try:
+        await asyncio.wait_for(_heavy_semaphore.acquire(), timeout=HEAVY_QUEUE_TIMEOUT_SECONDS)
+    except (asyncio.TimeoutError, TimeoutError):
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "The server is busy right now — please try again in a moment."},
+            headers={"Retry-After": "15"},
+        )
+    try:
+        return await call_next(request)
+    finally:
+        _heavy_semaphore.release()
+
+
+@app.middleware("http")
 async def _auth_middleware(request: Request, call_next):
     if not ACCESS_PASSWORD:
         return await call_next(request)
@@ -372,6 +471,36 @@ async def _auth_middleware(request: Request, call_next):
             return RedirectResponse(url="/login", status_code=303)
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     return await call_next(request)
+
+
+# The UI is a single inline-scripted page, so 'unsafe-inline' is required;
+# unpkg.com is the CDN fallback for the three.js viewer. Swagger UI (/docs,
+# /redoc) loads its bundle from jsdelivr, so those paths skip the CSP only.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' https://unpkg.com; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "connect-src 'self'; "
+    "font-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'self'"
+)
+_CSP_EXEMPT_PATHS = {"/docs", "/redoc", "/openapi.json"}
+
+
+@app.middleware("http")
+async def _security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if request.url.path not in _CSP_EXEMPT_PATHS:
+        response.headers.setdefault("Content-Security-Policy", _CSP)
+    return response
 
 
 @app.exception_handler(ValueError)
@@ -417,6 +546,14 @@ def logout():
 @app.get("/healthz", include_in_schema=False)
 def healthz():
     return Response(content="OK", media_type="text/plain")
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots():
+    # Job artifacts are ephemeral (TTL-swept) — keep crawlers out of them.
+    return Response(
+        content="User-agent: *\nDisallow: /files/\n",
+        media_type="text/plain",
+    )
 
 @app.get("/features", include_in_schema=False)
 def features():

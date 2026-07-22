@@ -13,6 +13,9 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:-}
       # Optional: enable prompt->outline generation
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Public-instance guards (set to 0 to disable either one)
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-20}
+      HEAVY_CONCURRENCY: ${HEAVY_CONCURRENCY:-2}
     volumes:
       - ./output:/app/output
       - ./examples:/app/examples
