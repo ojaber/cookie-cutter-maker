@@ -15,13 +15,17 @@ It includes:
   behind a disclosure, light/dark theme, works on phones,
 - public-instance guards (per-IP rate limiting + a concurrency cap on the
   heavy pipeline endpoints), security headers and `robots.txt`,
-- Docker build/run and Terraform for DigitalOcean App Platform.
+- Docker build/run and a one-click-ish free deployment to Hugging Face Spaces
+  (auto-deploys from GitHub on every push to `main`).
 
 ## Quick start (Docker)
 
 ```bash
-docker compose up --build
+make docker-up        # or: mkdir -p output && docker compose up --build
 ```
+
+(The `mkdir` matters on Linux: the container runs as a non-root user and
+needs the bind-mounted `output/` dir to be writable by you, not root.)
 
 Open:
 - UI: http://localhost:8000
@@ -38,7 +42,7 @@ pytest
 
 ## License
 
-MIT License © seaburr
+MIT — original project © seaburr, modifications © ojaber. See `LICENSE`.
 
 ## Offline flow (recommended)
 
@@ -104,6 +108,7 @@ If you want prompt -> outline generation:
 | `RATE_LIMIT_PER_MINUTE` | `20` | Max heavy pipeline POSTs per client IP per minute (HTTP 429 beyond that). `0` disables. |
 | `HEAVY_CONCURRENCY` | `2` | Max trace/mesh jobs running at once; extra requests queue briefly and then get HTTP 503. `0` disables. |
 | `HEAVY_QUEUE_TIMEOUT_SECONDS` | `30` | How long a request waits for a free job slot before returning 503. |
+| `FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` value — who may embed the app in an iframe. Auto-set to also allow `https://huggingface.co` when running on a Hugging Face Space. |
 
 ## Sharing it publicly
 
@@ -122,47 +127,38 @@ The defaults are chosen so you can put an instance on the open internet:
   and the app shows a login page first.
 - Keep `REMBG_ENABLED=false` on instances with less than ~2 GB of RAM.
 
-## Infrastructure (Terraform / DigitalOcean App Platform)
+## Deploy for free (Hugging Face Spaces)
 
-The `terraform/` directory contains configuration to deploy the app to [DigitalOcean App Platform](https://www.digitalocean.com/products/app-platform) at `cookies.seaburr.io`.
+The app deploys as a Docker Space on [Hugging Face Spaces](https://huggingface.co/spaces).
+The free CPU tier (2 vCPU, 16 GB RAM) is enough to run everything —
+including photo background removal — at no cost. The Space sleeps after
+48 hours without visitors and wakes automatically on the next visit.
 
-**First-time setup:**
+**One-time setup (about 5 minutes):**
 
-```bash
-cd terraform
-terraform init
-terraform apply \
-  -var="do_token=<your-do-token>"
-```
+1. Create a free account at [huggingface.co](https://huggingface.co), then
+   **New Space** → name it (e.g. `cookie-cutter-maker`) → SDK: **Docker** →
+   blank template → hardware: **CPU basic** (free) → Public.
+2. Create an access token with **Write** scope at
+   [Settings → Access Tokens](https://huggingface.co/settings/tokens).
+3. In this GitHub repo: **Settings → Secrets and variables → Actions**
+   - New **secret** `HF_TOKEN` = the token from step 2.
+   - New **variable** `HF_SPACE` = your Space id, e.g. `yourname/cookie-cutter-maker`.
+4. Push to `main` (or run the **deploy-space** workflow from the Actions tab).
 
-**With optional variables:**
+Every push to `main` now auto-deploys. Your app lives at
+`https://<yourname>-<spacename>.hf.space` (linked from the Space page).
 
-```bash
-terraform apply \
-  -var="do_token=<your-do-token>" \
-  -var="openai_api_key=<your-openai-key>" \
-  -var="rembg_enabled=true" \
-  -var="instance_size_slug=apps-s-1vcpu-1gb-fixed"
-```
-
-**Update existing infrastructure:**
-
-```bash
-cd terraform
-terraform apply -var="do_token=<your-do-token>"
-```
-
-Terraform will show a plan of changes before applying. Key variables:
-
-| Variable | Default | Description |
-|---|---|---|
-| `do_token` | _(required)_ | DigitalOcean personal access token. |
-| `image_tag` | `latest` | Docker image tag to deploy from GHCR. |
-| `region` | `atl` | App Platform region (`atl`, `nyc`, `ams`, `sfo`, `fra`, `lon`, `sgp`, `syd`, `tor`). |
-| `instance_size_slug` | `apps-s-1vcpu-1gb-fixed` | App Platform instance size. |
-| `instance_count` | `1` | Number of instances. |
-| `rembg_enabled` | `false` | Enable rembg background removal (see above). |
-| `openai_api_key` | _(unset)_ | Optional — enables prompt-to-outline generation. |
+Notes:
+- When the app runs on Spaces it automatically allows being embedded on
+  `huggingface.co` (the Space page shows the app in an iframe). Elsewhere,
+  embedding stays locked down — override with `FRAME_ANCESTORS` if needed.
+- Set optional env vars (e.g. `ACCESS_PASSWORD`, `OPENAI_API_KEY`) under
+  **Space Settings → Variables and secrets**.
+- No credit card, no Terraform, no registry — the Space builds the
+  `Dockerfile` itself. Any other container host (Render, Fly.io, Cloud Run,
+  DigitalOcean) also works: the image is a standard FastAPI container
+  listening on port 8000.
 
 ## CLI
 

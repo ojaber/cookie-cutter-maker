@@ -473,6 +473,15 @@ async def _auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+# Where the app may be embedded in an iframe. Hugging Face Spaces shows the
+# app inside an iframe on huggingface.co — when running there (the platform
+# injects SPACE_ID) that origin is allowed automatically. Set FRAME_ANCESTORS
+# to override, e.g. "'self' https://example.com".
+_DEFAULT_FRAME_ANCESTORS = (
+    "'self' https://huggingface.co" if os.environ.get("SPACE_ID") else "'self'"
+)
+FRAME_ANCESTORS = os.environ.get("FRAME_ANCESTORS", "").strip() or _DEFAULT_FRAME_ANCESTORS
+
 # The UI is a single inline-scripted page, so 'unsafe-inline' is required;
 # unpkg.com is the CDN fallback for the three.js viewer. Swagger UI (/docs,
 # /redoc) loads its bundle from jsdelivr, so those paths skip the CSP only.
@@ -486,7 +495,7 @@ _CSP = (
     "object-src 'none'; "
     "base-uri 'self'; "
     "form-action 'self'; "
-    "frame-ancestors 'self'"
+    f"frame-ancestors {FRAME_ANCESTORS}"
 )
 _CSP_EXEMPT_PATHS = {"/docs", "/redoc", "/openapi.json"}
 
@@ -495,7 +504,10 @@ _CSP_EXEMPT_PATHS = {"/docs", "/redoc", "/openapi.json"}
 async def _security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    if FRAME_ANCESTORS == "'self'":
+        # X-Frame-Options cannot express an allow-list; when embedding is
+        # opened up, the CSP frame-ancestors directive alone governs it.
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if request.url.path not in _CSP_EXEMPT_PATHS:

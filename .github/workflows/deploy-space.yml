@@ -1,0 +1,50 @@
+name: deploy-space
+
+# Auto-deploys the app to a Hugging Face Space (free CPU tier) on every push
+# to main. One-time setup:
+#   1. Create a Space at huggingface.co: New Space -> Docker -> blank template
+#      (CPU basic hardware is free).
+#   2. In this GitHub repo: Settings -> Secrets and variables -> Actions:
+#      - Secret   HF_TOKEN: a huggingface.co access token with Write scope
+#      - Variable HF_SPACE: the Space id, e.g. yourname/cookie-cutter-maker
+#   3. Push to main (or run this workflow manually from the Actions tab).
+# The Space then serves the app at https://<owner>-<name>.hf.space.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  sync:
+    if: ${{ vars.HF_SPACE != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Prepend Space metadata to README
+        # Hugging Face reads Space config from YAML front-matter at the top of
+        # README.md. It is added here at deploy time so the GitHub README
+        # stays clean.
+        run: |
+          printf -- '---\ntitle: Cookie Cutter Maker\nemoji: %s\ncolorFrom: yellow\ncolorTo: red\nsdk: docker\napp_port: 8000\npinned: false\nshort_description: Turn any picture into a 3D-printable cookie cutter\n---\n\n' '🍪' > /tmp/front_matter
+          cat /tmp/front_matter README.md > /tmp/readme && mv /tmp/readme README.md
+
+      - name: Push to the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ vars.HF_SPACE }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_TOKEN secret is not set (repo Settings -> Secrets and variables -> Actions)."
+            exit 1
+          fi
+          HF_USER="${HF_SPACE%%/*}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "Add Hugging Face Space metadata"
+          git push --force "https://${HF_USER}:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" HEAD:main
