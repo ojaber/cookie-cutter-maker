@@ -15,8 +15,8 @@ It includes:
   behind a disclosure, light/dark theme, works on phones,
 - public-instance guards (per-IP rate limiting + a concurrency cap on the
   heavy pipeline endpoints), security headers and `robots.txt`,
-- Docker build/run and a one-click-ish free deployment to Hugging Face Spaces
-  (auto-deploys from GitHub on every push to `main`).
+- a free, auto-deploying setup for [Render](https://render.com) (native
+  Python, no Docker needed) plus a `Dockerfile` for any container host.
 
 ## Quick start (Docker)
 
@@ -108,7 +108,7 @@ If you want prompt -> outline generation:
 | `RATE_LIMIT_PER_MINUTE` | `20` | Max heavy pipeline POSTs per client IP per minute (HTTP 429 beyond that). `0` disables. |
 | `HEAVY_CONCURRENCY` | `2` | Max trace/mesh jobs running at once; extra requests queue briefly and then get HTTP 503. `0` disables. |
 | `HEAVY_QUEUE_TIMEOUT_SECONDS` | `30` | How long a request waits for a free job slot before returning 503. |
-| `FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` value — who may embed the app in an iframe. Auto-set to also allow `https://huggingface.co` when running on a Hugging Face Space. |
+| `FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` value — who may embed the app in an iframe. Set e.g. `'self' https://example.com` to allow embedding on another site. |
 
 ## Sharing it publicly
 
@@ -127,38 +127,36 @@ The defaults are chosen so you can put an instance on the open internet:
   and the app shows a login page first.
 - Keep `REMBG_ENABLED=false` on instances with less than ~2 GB of RAM.
 
-## Deploy for free (Hugging Face Spaces)
+## Deploy for free (Render)
 
-The app deploys as a Docker Space on [Hugging Face Spaces](https://huggingface.co/spaces).
-The free CPU tier (2 vCPU, 16 GB RAM) is enough to run everything —
-including photo background removal — at no cost. The Space sleeps after
-48 hours without visitors and wakes automatically on the next visit.
+The app runs on [Render](https://render.com)'s free tier as a native Python
+web service — no Docker image, no credit card. Render connects to your GitHub
+repo and **auto-deploys on every push** to the chosen branch. The repo ships a
+`render.yaml` blueprint (free plan, `requirements-render.txt`, photo AI off) so
+setup is just a few clicks.
 
-**One-time setup (about 5 minutes):**
+**One-time setup (about 3 minutes):**
 
-1. Create a free account at [huggingface.co](https://huggingface.co), then
-   **New Space** → name it (e.g. `cookie-cutter-maker`) → SDK: **Docker** →
-   blank template → hardware: **CPU basic** (free) → Public.
-2. Create an access token with **Write** scope at
-   [Settings → Access Tokens](https://huggingface.co/settings/tokens).
-3. In this GitHub repo: **Settings → Secrets and variables → Actions**
-   - New **secret** `HF_TOKEN` = the token from step 2.
-   - New **variable** `HF_SPACE` = your Space id, e.g. `yourname/cookie-cutter-maker`.
-4. Push to `main` (or run the **deploy-space** workflow from the Actions tab).
+1. Create a free account at [render.com](https://render.com) (sign in with
+   GitHub).
+2. **New → Blueprint**, pick this repo, and Render reads `render.yaml`.
+3. Click **Apply**. Render installs the dependencies and starts the app.
 
-Every push to `main` now auto-deploys. Your app lives at
-`https://<yourname>-<spacename>.hf.space` (linked from the Space page).
+Your app goes live at `https://<name>.onrender.com` and re-deploys on every
+push. Set optional env vars (`ACCESS_PASSWORD`, `OPENAI_API_KEY`, …) under the
+service's **Environment** tab.
 
-Notes:
-- When the app runs on Spaces it automatically allows being embedded on
-  `huggingface.co` (the Space page shows the app in an iframe). Elsewhere,
-  embedding stays locked down — override with `FRAME_ANCESTORS` if needed.
-- Set optional env vars (e.g. `ACCESS_PASSWORD`, `OPENAI_API_KEY`) under
-  **Space Settings → Variables and secrets**.
-- No credit card, no Terraform, no registry — the Space builds the
-  `Dockerfile` itself. Any other container host (Render, Fly.io, Cloud Run,
-  DigitalOcean) also works: the image is a standard FastAPI container
-  listening on port 8000.
+Free-tier trade-offs:
+- **512 MB RAM**, so photo background-removal (the U2Net model) stays off —
+  the blueprint sets `REMBG_ENABLED=false`. Simple outlines, logos, and
+  photos on a plain background all still work.
+- The service **sleeps after ~15 min of inactivity** and takes ~1 minute to
+  wake on the next visit (fine for a hobby/share link).
+
+Prefer more headroom (photo AI on, no sleep)? The app is a standard FastAPI
+service on port 8000, so any container or Python host works too — Google Cloud
+Run, Fly.io, Railway, a small VPS, etc. Use `requirements.txt` (full) and the
+`Dockerfile` there.
 
 ## CLI
 

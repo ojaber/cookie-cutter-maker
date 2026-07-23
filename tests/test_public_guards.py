@@ -51,18 +51,6 @@ def test_default_frame_policy_is_self_only(client):
     assert "frame-ancestors 'self'" in r.headers["Content-Security-Policy"]
 
 
-def test_hf_space_runtime_allows_huggingface_embedding(tmp_path, monkeypatch):
-    """Hugging Face Spaces embed the app in an iframe on huggingface.co; the
-    injected SPACE_ID env var must open frame-ancestors automatically."""
-    from fastapi.testclient import TestClient
-
-    mod = _load_app(tmp_path, monkeypatch, SPACE_ID="user/cookie-cutter-maker")
-    with TestClient(mod.app) as c:
-        r = c.get("/")
-        assert "frame-ancestors 'self' https://huggingface.co" in r.headers["Content-Security-Policy"]
-        assert "X-Frame-Options" not in r.headers
-
-
 def test_frame_ancestors_env_override(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
