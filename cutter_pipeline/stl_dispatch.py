@@ -7,6 +7,29 @@ from cutter_pipeline.stl_cutter import polygon_to_cookie_cutter_stl
 from cutter_pipeline.trace_outline import TraceResult
 
 
+def _footprint_mm(stl_path: str) -> dict:
+    """Measured XY extents of the mesh that was just written.
+
+    This is what actually gets printed, and it is wider than the requested
+    width: the grip rim extends outward past the outline (and the wall itself
+    straddles the outline by half its thickness). Reporting the requested
+    width alone understates the part — a 3x4 grid of 30 mm cells is 90 mm
+    between wall centrelines but prints 95 mm wide with the default rim.
+    """
+    try:
+        import trimesh
+
+        mesh = trimesh.load(stl_path, force="mesh")
+        v = mesh.vertices
+        return {
+            "footprint_w_mm": float(v[:, 0].max() - v[:, 0].min()),
+            "footprint_h_mm": float(v[:, 1].max() - v[:, 1].min()),
+        }
+    except Exception:
+        # Purely informational — never fail a generation over it.
+        return {}
+
+
 def generate_stl_from_trace(
     traced: TraceResult,
     stl_path: str,
@@ -49,6 +72,7 @@ def generate_stl_from_trace(
             "height_mm": lattice_height_mm(traced.lattice, target_width_mm),
             "cols": traced.cols,
             "rows": traced.rows,
+            **_footprint_mm(stl_path),
         }
 
     if traced.polygon is None:
@@ -73,4 +97,4 @@ def generate_stl_from_trace(
         drop_holes=drop_holes,
         min_component_area_mm2=min_component_area_mm2,
     )
-    return {"height_mm": None, "cols": None, "rows": None}
+    return {"height_mm": None, "cols": None, "rows": None, **_footprint_mm(stl_path)}

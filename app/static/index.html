@@ -627,12 +627,12 @@
           </div>
           <div class="field">
             <div class="field-head">
-              <label for="simp">Simplify outline</label>
-              <span class="tip" tabindex="0" data-tip="Higher values give a smoother, simpler line with fewer little bumps — handy if the trace looks jagged.">?</span>
+              <label for="simp">Outline detail</label>
+              <span class="tip" tabindex="0" data-tip="How closely the outline follows your shape. Lower keeps curves smooth and rounded; higher strips detail away and leaves flatter, more angular edges.">?</span>
               <span class="spacer"></span>
-              <output class="val" id="simpVal" for="simp">0.002</output>
+              <output class="val" id="simpVal" for="simp">0.0008</output>
             </div>
-            <input id="simp" type="range" min="0.0005" max="0.01" value="0.002" step="0.0005"/>
+            <input id="simp" type="range" min="0.0002" max="0.005" value="0.0008" step="0.0001"/>
           </div>
           <div class="field">
             <div class="field-head">
@@ -1044,8 +1044,11 @@ function renderGridPreview() {
     return;
   }
   const W = spec.cols * spec.cw, H = spec.rows * spec.ch;
+  // W×H spans the wall centrelines. The grip rim sticks out past that, so the
+  // printed part is a few mm larger — step 3 reports the measured size.
   summary.textContent =
-    `${spec.cols}×${spec.rows} cells of ${fmtMm(spec.cw)} × ${fmtMm(spec.ch)} mm — total footprint ${fmtMm(W)} × ${fmtMm(H)} mm`;
+    `${spec.cols}×${spec.rows} cells of ${fmtMm(spec.cw)} × ${fmtMm(spec.ch)} mm — ` +
+    `${fmtMm(W)} × ${fmtMm(H)} mm across the cells, plus the grip rim around the outside`;
   if (mode !== 'grid') return;
   $('pngPreview').innerHTML = gridSvgMarkup(spec.cols, spec.rows, spec.cw, spec.ch);
 }
@@ -1266,12 +1269,19 @@ function buildDownloads(obj) {
 
 function setSizeSummary(data) {
   const parts = [];
-  const w = gridSpecSize ? gridSpecSize.w : Number($('width').value);
-  const footH = Number(data && data.height_mm);
-  if (data && data.topology === 'lattice' && Number.isFinite(footH)) {
-    parts.push(`${fmtMm(w)} × ${fmtMm(footH)} mm footprint`);
+  // Prefer the server's measurement of the finished mesh: the grip rim extends
+  // past the outline, so the part prints a few mm larger than the width asked
+  // for. Fall back to the requested numbers if the server didn't report it.
+  const fw = Number(data && data.footprint_w_mm);
+  const fh = Number(data && data.footprint_h_mm);
+  if (Number.isFinite(fw) && Number.isFinite(fh) && fw > 0) {
+    parts.push(`${fmtMm(fw)} × ${fmtMm(fh)} mm on the print bed`);
   } else {
-    parts.push(`${fmtMm(w)} mm wide`);
+    const w = gridSpecSize ? gridSpecSize.w : Number($('width').value);
+    const footH = Number(data && data.height_mm);
+    parts.push(data && data.topology === 'lattice' && Number.isFinite(footH)
+      ? `${fmtMm(w)} × ${fmtMm(footH)} mm`
+      : `${fmtMm(w)} mm wide`);
   }
   parts.push(`${$('height').value} mm tall`);
   parts.push(`${Number($('wall').value).toFixed(1)} mm walls`);

@@ -92,7 +92,7 @@ def _project_mesh(mesh: trimesh.Trimesh, raster_size: int = 1024) -> tuple[Polyg
 def extract_outline_from_stl(
     stl_path: str,
     svg_out_path: str,
-    simplify_epsilon: float = 0.002,
+    simplify_epsilon: float = 0.0008,
     topology: TopologyParam = "auto",
 ) -> TraceResult:
     mesh = trimesh.load(stl_path, force="mesh")
