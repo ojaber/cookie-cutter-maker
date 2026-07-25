@@ -1805,6 +1805,28 @@ function refreshViewerTheme() {
   if (stlMesh) stlMesh.material.color.set(viewerCssColor('--viewer-mesh', '#cf8a43'));
 }
 
+// How far the model spins for a given finger/mouse travel.
+//
+// OrbitControls turns the model by 2π · dx · rotateSpeed / canvasHeight, so a
+// short canvas spins faster for the same drag. A phone viewer is roughly half
+// the height of the desktop one, which made a 100 px flick sweep ~116° — a
+// third of a turn — and left it feeling uncontrollable. Solving that formula
+// for a fixed angle per 100 px gives speed = height · degrees / 36000, so the
+// response stays constant whatever size the canvas is.
+const DEG_PER_100PX_TOUCH = 40;   // deliberately calmer than a mouse
+const DEG_PER_100PX_MOUSE = 64;   // three.js default (rotateSpeed 1.0) feel
+
+function tuneControlsForPointer() {
+  if (!controls || !renderer) return;
+  const coarse = window.matchMedia('(pointer: coarse)').matches;
+  const h = renderer.domElement.clientHeight || 400;
+  const target = coarse ? DEG_PER_100PX_TOUCH : DEG_PER_100PX_MOUSE;
+  controls.rotateSpeed = Math.max(0.2, Math.min(1.0, (h * target) / 36000));
+  // Pinch applies a zoom step per touchmove, which fires far more often than a
+  // wheel notch, so ease that off too.
+  controls.zoomSpeed = coarse ? 0.6 : 1.0;
+}
+
 function initStlViewer() {
   const canvas = $('stlCanvas');
   if (!canvas) return false;
@@ -1825,6 +1847,7 @@ function initStlViewer() {
 
   controls = new THREE.OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
+  tuneControlsForPointer();
 
   const light = new THREE.HemisphereLight(0xffffff, 0x555544, 1.05);
   scene.add(light);
@@ -1849,6 +1872,7 @@ function initStlViewer() {
     renderer.setSize(sizeW, sizeH, false);
     camera.aspect = sizeW / sizeH;
     camera.updateProjectionMatrix();
+    tuneControlsForPointer();   // sensitivity depends on the canvas height
   };
   if (window.ResizeObserver) new ResizeObserver(resize).observe(canvas.parentElement);
   window.addEventListener('resize', resize);
