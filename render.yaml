@@ -1,0 +1,27 @@
+# Render Blueprint — free tier, no credit card, auto-deploys on every push to
+# the connected branch. The app runs as a native Python process (no Docker
+# image build needed). One-time setup: render.com -> New -> Blueprint ->
+# connect this repo. See the README "Deploy for free (Render)" section.
+services:
+  - type: web
+    name: cookie-cutter-maker
+    runtime: python
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /healthz
+    # A slimmer install than requirements.txt: no rembg/onnxruntime (the photo
+    # background-removal model), which won't fit the 512 MB free tier anyway,
+    # and no pytest. Keeps the build small and fast.
+    buildCommand: pip install -r requirements-render.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # Photo background-removal (rembg/U2Net) needs ~1 GB+ RAM; leave it OFF
+      # on the 512 MB free tier. Simple outlines, logos, and photos on a plain
+      # background all still work; it is also not installed on this tier.
+      - key: REMBG_ENABLED
+        value: "false"
+      # 512 MB is tight — run one heavy trace/mesh job at a time.
+      - key: HEAVY_CONCURRENCY
+        value: "1"

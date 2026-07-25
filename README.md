@@ -15,13 +15,17 @@ It includes:
   behind a disclosure, light/dark theme, works on phones,
 - public-instance guards (per-IP rate limiting + a concurrency cap on the
   heavy pipeline endpoints), security headers and `robots.txt`,
-- Docker build/run and Terraform for DigitalOcean App Platform.
+- a free, auto-deploying setup for [Render](https://render.com) (native
+  Python, no Docker needed) plus a `Dockerfile` for any container host.
 
 ## Quick start (Docker)
 
 ```bash
-docker compose up --build
+make docker-up        # or: mkdir -p output && docker compose up --build
 ```
+
+(The `mkdir` matters on Linux: the container runs as a non-root user and
+needs the bind-mounted `output/` dir to be writable by you, not root.)
 
 Open:
 - UI: http://localhost:8000
@@ -38,7 +42,7 @@ pytest
 
 ## License
 
-MIT License © seaburr
+MIT — original project © seaburr, modifications © ojaber. See `LICENSE`.
 
 ## Offline flow (recommended)
 
@@ -104,6 +108,7 @@ If you want prompt -> outline generation:
 | `RATE_LIMIT_PER_MINUTE` | `20` | Max heavy pipeline POSTs per client IP per minute (HTTP 429 beyond that). `0` disables. |
 | `HEAVY_CONCURRENCY` | `2` | Max trace/mesh jobs running at once; extra requests queue briefly and then get HTTP 503. `0` disables. |
 | `HEAVY_QUEUE_TIMEOUT_SECONDS` | `30` | How long a request waits for a free job slot before returning 503. |
+| `FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` value — who may embed the app in an iframe. Set e.g. `'self' https://example.com` to allow embedding on another site. |
 
 ## Sharing it publicly
 
@@ -122,47 +127,36 @@ The defaults are chosen so you can put an instance on the open internet:
   and the app shows a login page first.
 - Keep `REMBG_ENABLED=false` on instances with less than ~2 GB of RAM.
 
-## Infrastructure (Terraform / DigitalOcean App Platform)
+## Deploy for free (Render)
 
-The `terraform/` directory contains configuration to deploy the app to [DigitalOcean App Platform](https://www.digitalocean.com/products/app-platform) at `cookies.seaburr.io`.
+The app runs on [Render](https://render.com)'s free tier as a native Python
+web service — no Docker image, no credit card. Render connects to your GitHub
+repo and **auto-deploys on every push** to the chosen branch. The repo ships a
+`render.yaml` blueprint (free plan, `requirements-render.txt`, photo AI off) so
+setup is just a few clicks.
 
-**First-time setup:**
+**One-time setup (about 3 minutes):**
 
-```bash
-cd terraform
-terraform init
-terraform apply \
-  -var="do_token=<your-do-token>"
-```
+1. Create a free account at [render.com](https://render.com) (sign in with
+   GitHub).
+2. **New → Blueprint**, pick this repo, and Render reads `render.yaml`.
+3. Click **Apply**. Render installs the dependencies and starts the app.
 
-**With optional variables:**
+Your app goes live at `https://<name>.onrender.com` and re-deploys on every
+push. Set optional env vars (`ACCESS_PASSWORD`, `OPENAI_API_KEY`, …) under the
+service's **Environment** tab.
 
-```bash
-terraform apply \
-  -var="do_token=<your-do-token>" \
-  -var="openai_api_key=<your-openai-key>" \
-  -var="rembg_enabled=true" \
-  -var="instance_size_slug=apps-s-1vcpu-1gb-fixed"
-```
+Free-tier trade-offs:
+- **512 MB RAM**, so photo background-removal (the U2Net model) stays off —
+  the blueprint sets `REMBG_ENABLED=false`. Simple outlines, logos, and
+  photos on a plain background all still work.
+- The service **sleeps after ~15 min of inactivity** and takes ~1 minute to
+  wake on the next visit (fine for a hobby/share link).
 
-**Update existing infrastructure:**
-
-```bash
-cd terraform
-terraform apply -var="do_token=<your-do-token>"
-```
-
-Terraform will show a plan of changes before applying. Key variables:
-
-| Variable | Default | Description |
-|---|---|---|
-| `do_token` | _(required)_ | DigitalOcean personal access token. |
-| `image_tag` | `latest` | Docker image tag to deploy from GHCR. |
-| `region` | `atl` | App Platform region (`atl`, `nyc`, `ams`, `sfo`, `fra`, `lon`, `sgp`, `syd`, `tor`). |
-| `instance_size_slug` | `apps-s-1vcpu-1gb-fixed` | App Platform instance size. |
-| `instance_count` | `1` | Number of instances. |
-| `rembg_enabled` | `false` | Enable rembg background removal (see above). |
-| `openai_api_key` | _(unset)_ | Optional — enables prompt-to-outline generation. |
+Prefer more headroom (photo AI on, no sleep)? The app is a standard FastAPI
+service on port 8000, so any container or Python host works too — Google Cloud
+Run, Fly.io, Railway, a small VPS, etc. Use `requirements.txt` (full) and the
+`Dockerfile` there.
 
 ## CLI
 

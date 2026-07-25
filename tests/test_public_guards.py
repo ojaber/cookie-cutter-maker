@@ -45,6 +45,22 @@ def test_csp_allows_viewer_cdn_fallback(client):
     assert "img-src 'self' data: blob:" in csp
 
 
+def test_default_frame_policy_is_self_only(client):
+    r = client.get("/")
+    assert r.headers["X-Frame-Options"] == "SAMEORIGIN"
+    assert "frame-ancestors 'self'" in r.headers["Content-Security-Policy"]
+
+
+def test_frame_ancestors_env_override(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    mod = _load_app(tmp_path, monkeypatch, FRAME_ANCESTORS="'self' https://example.com")
+    with TestClient(mod.app) as c:
+        r = c.get("/")
+        assert "frame-ancestors 'self' https://example.com" in r.headers["Content-Security-Policy"]
+        assert "X-Frame-Options" not in r.headers
+
+
 # ── robots.txt ────────────────────────────────────────────────────────────────
 
 def test_robots_txt_disallows_job_files(client):

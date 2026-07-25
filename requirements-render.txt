@@ -1,0 +1,19 @@
+# Slim runtime deps for free-tier hosts (e.g. Render free plan).
+# = requirements.txt minus rembg[cpu] (the ~170 MB photo background-removal
+# model, which needs more RAM than a 512 MB free instance has) and pytest.
+# Photos on a plain background still work; complex-background photos fall back
+# to graph-cut segmentation. For full photo AI, use requirements.txt on a host
+# with >=1 GB RAM.
+numpy
+pillow
+scikit-image
+shapely
+trimesh
+manifold3d
+mapbox_earcut
+python-dotenv
+openai
+fastapi
+uvicorn[standard]
+python-multipart
+prometheus-client

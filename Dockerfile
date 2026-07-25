@@ -4,6 +4,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# Run as a non-root user (uid 1000); all writable paths live under /app.
+# Note for bind mounts: create the host dir before `docker compose up` (the
+# Makefile does this) or Docker creates it root-owned and uid 1000 cannot
+# write job files into it.
+RUN useradd -m -u 1000 app
+
 WORKDIR /app
 
 # Install dependencies first so Docker can cache this layer independently
@@ -19,6 +25,10 @@ ENV U2NET_HOME=/app/models
 RUN python -c "from rembg.sessions.u2net import U2netSession; U2netSession.download_models()"
 
 COPY . /app
+
+RUN mkdir -p /app/output && chown -R app:app /app
+
+USER app
 
 EXPOSE 8000
 # Allow configurable worker count via UVICORN_WORKERS (default 2).
