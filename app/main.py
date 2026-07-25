@@ -765,7 +765,7 @@ async def trace_from_png(
     file: UploadFile = File(...),
     name: str = Form("outline"),
     threshold: int = Form(200),
-    simplify: float = Form(0.002),
+    simplify: float = Form(0.0008),
     smooth_radius: float = Form(1.0),
     extraction_mode: str = Form("auto"),
     delta_e_threshold: float = Form(28.0),
@@ -813,7 +813,7 @@ async def trace_from_png(
 async def trace_from_stl(
     file: UploadFile = File(...),
     name: str = Form("outline"),
-    simplify: float = Form(0.002),
+    simplify: float = Form(0.0008),
     topology: str = Form("auto"),
 ):
     name = _safe_name(name)
@@ -871,7 +871,7 @@ async def pipeline_from_png(
     keep_holes: bool = Form(False),
     min_component_area_mm2: float = Form(25.0),
     threshold: int = Form(200),
-    simplify: float = Form(0.002),
+    simplify: float = Form(0.0008),
     smooth_radius: float = Form(1.0),
     extraction_mode: str = Form("auto"),
     delta_e_threshold: float = Form(28.0),
@@ -937,6 +937,9 @@ async def pipeline_from_png(
     }
     if stl_meta.get("height_mm") is not None:
         result["height_mm"] = stl_meta["height_mm"]
+    for key in ("footprint_w_mm", "footprint_h_mm"):
+        if stl_meta.get(key) is not None:
+            result[key] = stl_meta[key]
     if traced.extraction_warning:
         result["warning"] = traced.extraction_warning
     return result
@@ -960,7 +963,7 @@ async def pipeline_from_stl(
     tip_smooth_mm: float = Form(0.6),
     keep_holes: bool = Form(False),
     min_component_area_mm2: float = Form(25.0),
-    simplify: float = Form(0.002),
+    simplify: float = Form(0.0008),
     topology: str = Form("auto"),
 ):
     name = _safe_name(name)
@@ -1019,6 +1022,9 @@ async def pipeline_from_stl(
     await _add_stl_size_fields(result, stl_input_path)
     if stl_meta.get("height_mm") is not None:
         result["height_mm"] = stl_meta["height_mm"]
+    for key in ("footprint_w_mm", "footprint_h_mm"):
+        if stl_meta.get(key) is not None:
+            result[key] = stl_meta[key]
     if traced.extraction_warning:
         result["warning"] = traced.extraction_warning
     return result
@@ -1273,6 +1279,9 @@ async def pipeline_from_grid(
     }
     if stl_meta.get("height_mm") is not None:
         result["height_mm"] = stl_meta["height_mm"]
+    for key in ("footprint_w_mm", "footprint_h_mm"):
+        if stl_meta.get(key) is not None:
+            result[key] = stl_meta[key]
     return result
 
 
@@ -1281,7 +1290,7 @@ async def trace_from_job(
     job_id: str = Form(...),
     name: str = Form("cookie_cutter"),
     threshold: int = Form(200),
-    simplify: float = Form(0.002),
+    simplify: float = Form(0.0008),
     smooth_radius: float = Form(1.0),
     extraction_mode: str = Form("auto"),
     delta_e_threshold: float = Form(28.0),
@@ -1428,6 +1437,9 @@ async def stl_from_job(
     }
     if stl_meta.get("height_mm") is not None:
         result["height_mm"] = stl_meta["height_mm"]
+    for key in ("footprint_w_mm", "footprint_h_mm"):
+        if stl_meta.get(key) is not None:
+            result[key] = stl_meta[key]
 
     return {
         **result,

@@ -522,3 +522,53 @@ def test_session_token_verification_is_constant_time(auth_client):
     nonce, _sig = token.rsplit(".", 1)
     assert mod._verify_session_token(nonce + ".0" * 64) is False
     assert mod._verify_session_token("no-dot-here") is False
+
+
+# ── Reported footprint matches the printed part ───────────────────────────────
+
+def test_generated_stl_reports_its_real_footprint(client):
+    """The grip rim extends past the outline, so the part prints wider than the
+    grid's cell area. The response must report the measured size, not just the
+    requested one."""
+    import trimesh
+
+    r = client.post(
+        "/trace/from-grid",
+        data={"name": "grid", "cols": "3", "rows": "4", "cell_w_mm": "30", "cell_h_mm": "30"},
+    )
+    job_id = r.json()["job_id"]
+    assert r.json()["grid_width_mm"] == pytest.approx(90.0)
+
+    r2 = client.post(
+        "/stl/from-job",
+        data={"job_id": job_id, "name": "grid", "flange_out_mm": "2.5", "wall_mm": "1.4"},
+    )
+    body = r2.json()
+    assert body["footprint_w_mm"] == pytest.approx(95.0, abs=0.2)   # 90 + 2 * 2.5 rim
+    assert body["footprint_h_mm"] == pytest.approx(125.0, abs=0.2)
+
+    mesh = trimesh.load(Path(client.app_module.OUTPUT_DIR) / job_id / "grid.stl", force="mesh")
+    extent_x = mesh.vertices[:, 0].max() - mesh.vertices[:, 0].min()
+    assert body["footprint_w_mm"] == pytest.approx(float(extent_x), abs=0.01)
+
+
+def test_footprint_tracks_the_rim_setting(client):
+    r = client.post("/trace/from-grid", data={"name": "g", "cols": "2", "rows": "2", "cell_w_mm": "30"})
+    job_id = r.json()["job_id"]
+    no_rim = client.post(
+        "/stl/from-job", data={"job_id": job_id, "name": "g", "flange_out_mm": "0", "wall_mm": "1.4"}
+    ).json()
+    big_rim = client.post(
+        "/stl/from-job", data={"job_id": job_id, "name": "g", "flange_out_mm": "5", "wall_mm": "1.4"}
+    ).json()
+    # 60 mm of cells, plus half a wall each side with no rim, plus 5 mm each side with one.
+    assert no_rim["footprint_w_mm"] == pytest.approx(61.4, abs=0.2)
+    assert big_rim["footprint_w_mm"] == pytest.approx(70.0, abs=0.2)
+
+
+def test_single_shape_also_reports_a_footprint(client):
+    png = _make_outline_png()
+    r = client.post("/pipeline/from-png", data={"name": "c", "width_mm": "60"}, files={"file": ("a.png", png, "image/png")})
+    body = r.json()
+    # Wider than the requested 60 mm because of the rim.
+    assert body["footprint_w_mm"] > 60.0

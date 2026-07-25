@@ -51,7 +51,7 @@ def main():
     p.add_argument("--keep-holes", action="store_true", help="Keep interior holes instead of filling them")
     p.add_argument("--min-component-area-mm2", type=float, default=25.0, help="Discard tiny disconnected islands below this area")
     p.add_argument("--threshold", type=int, default=200)
-    p.add_argument("--simplify", type=float, default=0.002)
+    p.add_argument("--simplify", type=float, default=0.0008)
     p.add_argument("--smooth-radius", type=float, default=1.0, help="Gaussian blur radius (pixels) before tracing")
 
     args = p.parse_args()
