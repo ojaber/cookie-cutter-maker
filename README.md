@@ -103,6 +103,7 @@ If you want prompt -> outline generation:
 | `PIPELINE_OUTPUT_DIR` | `output` | Directory where generated job files (PNG, SVG, STL, ZIP) are written. |
 | `JOB_TTL_HOURS` | `24` | Job directories older than this are deleted by a background sweeper so the disk doesn't fill up. Set to `0` to keep jobs forever. |
 | `MAX_UPLOAD_BYTES` | `20971520` | Maximum accepted upload size (20 MB). |
+| `MAX_TRACE_PIXELS` | `2000000` | Images larger than this are downscaled before tracing. Peak memory scales with pixel count (the extractor works in LAB float64, 24 bytes/pixel), so a 12 MP phone photo would otherwise peak near 1 GB and OOM a small instance. Outlines are normalised to 0–1 and simplified, so the extra resolution does not change the result. Set to `0` to disable. |
 | `ACCESS_PASSWORD` | _(unset)_ | If set, the whole app sits behind a passphrase login. Leave unset for an open/public site. |
 | `SESSION_SECRET` | _(unset)_ | Signs login session cookies when `ACCESS_PASSWORD` is set. Set it to any long random string so sessions survive restarts/replicas. |
 | `RATE_LIMIT_PER_MINUTE` | `20` | Max heavy pipeline POSTs per client IP per minute (HTTP 429 beyond that). `0` disables. |

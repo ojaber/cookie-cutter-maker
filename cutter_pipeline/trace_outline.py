@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -8,6 +10,8 @@ import numpy as np
 from PIL import Image, ImageFilter
 from shapely.geometry import LineString, Polygon
 from skimage import measure
+
+logger = logging.getLogger(__name__)
 
 from cutter_pipeline.image_extractor import ImageMode, extract_foreground_mask
 from cutter_pipeline.lattice_extractor import LatticeDetectionError, extract_lattice_from_mask
@@ -147,6 +151,45 @@ def _trace_single(
     return poly, svg_path_d
 
 
+# Tracing normalises coordinates to 0..1 and simplifies in that space, so
+# resolution beyond a couple of megapixels does not change the traced outline —
+# but it multiplies peak memory. The extractor converts to LAB float64 at
+# 24 bytes per pixel, so a 12 MP phone photo peaks near 1 GB and OOM-kills a
+# small instance. Cap the working size instead. Set MAX_TRACE_PIXELS=0 to
+# disable (e.g. offline runs on a big machine).
+MAX_TRACE_PIXELS = int(os.environ.get("MAX_TRACE_PIXELS", "").strip() or 2_000_000)
+
+
+def fit_for_tracing(img: Image.Image) -> tuple[Image.Image, float]:
+    """Downscale an image to at most MAX_TRACE_PIXELS.
+
+    Returns the image to trace and the linear scale factor applied (1.0 when
+    untouched) so pixel-denominated settings can be adjusted to match.
+    """
+    if MAX_TRACE_PIXELS <= 0:
+        return img, 1.0
+    w, h = img.size
+    pixels = w * h
+    if pixels <= MAX_TRACE_PIXELS:
+        return img, 1.0
+    scale = (MAX_TRACE_PIXELS / pixels) ** 0.5
+    # Floor rather than round: rounding up can land just over the cap, and the
+    # promise here is "at most MAX_TRACE_PIXELS".
+    target = (max(1, int(w * scale)), max(1, int(h * scale)))
+    # JPEGs can be decoded straight to a smaller size, so the full-resolution
+    # bitmap never needs to exist in the first place.
+    try:
+        img.draft("RGB", target)
+    except Exception:
+        pass
+    resized = img.resize(target, Image.LANCZOS)
+    logger.info(
+        "Tracing at %dx%d instead of %dx%d (%.1f MP -> %.1f MP) to bound memory.",
+        target[0], target[1], w, h, pixels / 1e6, (target[0] * target[1]) / 1e6,
+    )
+    return resized, scale
+
+
 def trace_png(
     png_path: str,
     svg_out_path: str,
@@ -158,8 +201,11 @@ def trace_png(
     topology: TopologyParam = "auto",
 ) -> TraceResult:
     img = Image.open(png_path)
+    img, trace_scale = fit_for_tracing(img)
     if smooth_radius > 0:
-        img = img.filter(ImageFilter.GaussianBlur(radius=smooth_radius))
+        # Radius is in pixels, so it has to shrink with the image to keep the
+        # same visual effect.
+        img = img.filter(ImageFilter.GaussianBlur(radius=smooth_radius * trace_scale))
 
     binary, detected_mode, warning = extract_foreground_mask(
         img,
