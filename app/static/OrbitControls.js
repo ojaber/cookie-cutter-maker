@@ -65,14 +65,26 @@
           offset.applyQuaternion(quat);
           spherical.setFromVector3(offset);
           if (scope.autoRotate && state === STATE.NONE) rotateLeft(getAutoRotationAngle());
-          spherical.theta += sphericalDelta.theta;
-          spherical.phi += sphericalDelta.phi;
+          // With damping the delta is consumed a fraction at a time and decayed
+          // below, so only that fraction may be applied per frame. Applying the
+          // whole delta *and* decaying it (as this copy previously did) makes
+          // each drag keep travelling long after it ends — the model overshoots
+          // and feels uncontrollable, worst on a small phone canvas.
+          if (scope.enableDamping) {
+            spherical.theta += sphericalDelta.theta * scope.dampingFactor;
+            spherical.phi += sphericalDelta.phi * scope.dampingFactor;
+          } else {
+            spherical.theta += sphericalDelta.theta;
+            spherical.phi += sphericalDelta.phi;
+          }
           spherical.theta = Math.max(scope.minAzimuthAngle, Math.min(scope.maxAzimuthAngle, spherical.theta));
           spherical.phi = Math.max(scope.minPolarAngle, Math.min(scope.maxPolarAngle, spherical.phi));
           spherical.makeSafe();
           spherical.radius *= scale;
           spherical.radius = Math.max(scope.minDistance, Math.min(scope.maxDistance, spherical.radius));
-          scope.target.add(panOffset);
+          // Same reasoning as the rotation above.
+          if (scope.enableDamping) scope.target.addScaledVector(panOffset, scope.dampingFactor);
+          else scope.target.add(panOffset);
           offset.setFromSpherical(spherical);
           offset.applyQuaternion(quatInverse);
           position.copy(scope.target).add(offset);
