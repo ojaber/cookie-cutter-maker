@@ -153,6 +153,16 @@ _log.info(
 OUTPUT_DIR = Path(os.environ.get("PIPELINE_OUTPUT_DIR", "output")).resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+if not os.access(OUTPUT_DIR, os.W_OK):
+    # Every job writes here, so an unwritable dir turns each request into an
+    # opaque 500. Say so once, loudly, at startup instead. Most common cause:
+    # a root-owned bind mount with a non-root container user.
+    _log.error(
+        "Output directory %s is not writable by this process — job generation "
+        "will fail. Fix its ownership/permissions (see PIPELINE_OUTPUT_DIR).",
+        OUTPUT_DIR,
+    )
+
 # Delete job directories older than this many hours so the disk doesn't fill
 # up on long-running deployments. 0 disables cleanup.
 JOB_TTL_HOURS = _env_number("JOB_TTL_HOURS", 24, cast=float)
@@ -248,6 +258,9 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+_RATE_BUCKET_LIMIT = 5000
+
+
 def _rate_limited(ip: str) -> bool:
     """Sliding-window rate check. Returns True when the request should be rejected."""
     now = time.monotonic()
@@ -257,8 +270,15 @@ def _rate_limited(ip: str) -> bool:
     if len(bucket) >= RATE_LIMIT_PER_MINUTE:
         return True
     bucket.append(now)
-    if len(_rate_buckets) > 5000:
-        for key in [k for k, b in _rate_buckets.items() if not b]:
+    if len(_rate_buckets) > _RATE_BUCKET_LIMIT:
+        # Drop buckets whose newest hit has aged out of the window. Pruning on
+        # emptiness alone would leak: a bucket is only emptied when that same
+        # IP comes back, so one-off callers would linger forever.
+        stale = [
+            key for key, b in _rate_buckets.items()
+            if not b or now - b[-1] > _RATE_WINDOW_SECONDS
+        ]
+        for key in stale:
             del _rate_buckets[key]
     return False
 

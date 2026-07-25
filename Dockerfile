@@ -4,8 +4,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Run as a non-root user (uid 1000). Hugging Face Spaces recommends this and
-# it is safer everywhere; all writable paths live under /app.
+# Run as a non-root user (uid 1000); all writable paths live under /app.
+# Note for bind mounts: create the host dir before `docker compose up` (the
+# Makefile does this) or Docker creates it root-owned and uid 1000 cannot
+# write job files into it.
 RUN useradd -m -u 1000 app
 
 WORKDIR /app
