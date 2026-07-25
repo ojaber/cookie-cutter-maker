@@ -35,24 +35,94 @@ from PIL import Image as _PILImage
 # Default PIL limit is ~89 MP — tighten to ~25 MP (≈5000×5000), which is more than
 # enough for a cookie-cutter outline.
 _PILImage.MAX_IMAGE_PIXELS = 25_000_000
-from cutter_pipeline.trace_outline import trace_png_to_polygon
-from cutter_pipeline.grid_spec import build_grid_trace, grid_size_mm
-from cutter_pipeline.stl_dispatch import generate_stl_from_trace
-from cutter_pipeline.trace_meta import load_trace_result, save_trace_result
-from cutter_pipeline.stl_extractor import extract_outline_from_stl
-from shapely.geometry import shape, mapping
-import trimesh
 import zipfile
-from openai import OpenAIError
-
-# Optional: prompt->png requires OPENAI_API_KEY
-try:
-    from cutter_pipeline.outline_openai import generate_outline_png
-    HAS_OPENAI = True
-except Exception:
-    HAS_OPENAI = False
 
 _log = logging.getLogger(__name__)
+
+# ── Lazy pipeline imports ─────────────────────────────────────────────────────
+# numpy/scipy/scikit-image/trimesh take several seconds to import from cold
+# storage. Importing them at module load blocks uvicorn from binding the port,
+# so a host that sleeps when idle (e.g. Render's free tier) serves nothing at
+# all until they finish. These wrappers defer each import to first call —
+# python caches it in sys.modules, so the cost is paid once — and
+# _warm_imports() preloads them in the background once the server is listening.
+# Call sites stay unchanged.
+
+
+def trace_png_to_polygon(*args, **kwargs):
+    from cutter_pipeline.trace_outline import trace_png_to_polygon as _f
+    return _f(*args, **kwargs)
+
+
+def build_grid_trace(*args, **kwargs):
+    from cutter_pipeline.grid_spec import build_grid_trace as _f
+    return _f(*args, **kwargs)
+
+
+def grid_size_mm(*args, **kwargs):
+    from cutter_pipeline.grid_spec import grid_size_mm as _f
+    return _f(*args, **kwargs)
+
+
+def generate_stl_from_trace(*args, **kwargs):
+    from cutter_pipeline.stl_dispatch import generate_stl_from_trace as _f
+    return _f(*args, **kwargs)
+
+
+def load_trace_result(*args, **kwargs):
+    from cutter_pipeline.trace_meta import load_trace_result as _f
+    return _f(*args, **kwargs)
+
+
+def save_trace_result(*args, **kwargs):
+    from cutter_pipeline.trace_meta import save_trace_result as _f
+    return _f(*args, **kwargs)
+
+
+def extract_outline_from_stl(*args, **kwargs):
+    from cutter_pipeline.stl_extractor import extract_outline_from_stl as _f
+    return _f(*args, **kwargs)
+
+
+def _openai_error_cls() -> type[BaseException]:
+    """The OpenAIError class, or a sentinel that never matches when the
+    package is unavailable, so `except _openai_error_cls()` stays valid."""
+    try:
+        from openai import OpenAIError
+        return OpenAIError
+    except Exception:
+        class _NeverRaised(Exception):
+            pass
+        return _NeverRaised
+
+
+def _generate_outline_png(prompt: str, out_path: str) -> None:
+    """Prompt -> outline PNG. Requires the optional OpenAI dependency."""
+    try:
+        from cutter_pipeline.outline_openai import generate_outline_png as _f
+    except Exception:
+        raise HTTPException(status_code=500, detail="OpenAI image step unavailable.")
+    _f(prompt, out_path)
+
+
+def _warm_imports() -> None:
+    """Preload the heavy geometry stack so the first real request doesn't wait
+    on it. Runs in a worker thread after the server is already accepting
+    connections, so it never delays startup."""
+    started = time.perf_counter()
+    try:
+        import cutter_pipeline.trace_outline  # noqa: F401
+        import cutter_pipeline.stl_dispatch  # noqa: F401
+        import cutter_pipeline.stl_extractor  # noqa: F401
+        import cutter_pipeline.grid_spec  # noqa: F401
+        import cutter_pipeline.trace_meta  # noqa: F401
+        import trimesh  # noqa: F401
+    except Exception:
+        # Not fatal: whichever import failed will be retried on first use and
+        # surface a real error to that request.
+        _log.exception("Background warmup failed; imports will happen on first use.")
+        return
+    _log.info("Pipeline warmup finished in %.2fs.", time.perf_counter() - started)
 
 
 def _env_number(name: str, default: float, cast=int):
@@ -201,7 +271,12 @@ async def _lifespan(app: FastAPI):
     sweeper = None
     if JOB_TTL_HOURS > 0:
         sweeper = asyncio.create_task(_sweep_old_jobs_forever())
+    # Fire-and-forget: the port is already bound by the time this runs.
+    warmup = asyncio.create_task(anyio.to_thread.run_sync(_warm_imports))
     yield
+    warmup.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await warmup
     if sweeper is not None:
         sweeper.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -363,6 +438,7 @@ def _verify_image_bytes(content: bytes) -> None:
 
 def _verify_stl_bytes(content: bytes) -> None:
     """Confirm the upload is a valid STL file before we run the pipeline on it."""
+    import trimesh
     try:
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".stl", delete=True) as tmp:
@@ -380,6 +456,8 @@ def _verify_stl_bytes(content: bytes) -> None:
 
 
 def _measure_stl_xy_mm(stl_path: Path) -> tuple[float, float]:
+    import trimesh
+
     mesh = trimesh.load(str(stl_path), force="mesh")
     if not hasattr(mesh, "vertices") or len(mesh.vertices) == 0:
         raise ValueError("STL file is empty or invalid.")
@@ -669,7 +747,7 @@ def _log_image_upload(filename: str, content: bytes, path: Path) -> None:
     except Exception:
         _log.info("Image upload — file=%r size=%.1fKB", filename, len(content) / 1024)
 
-def _openai_detail(exc: OpenAIError) -> str:
+def _openai_detail(exc: BaseException) -> str:
     """Prefer the nested OpenAI error message if available."""
     # Newer openai client exposes .body with {'error': {'message': ...}}
     body: Any = getattr(exc, "body", None)
@@ -971,8 +1049,6 @@ async def pipeline_from_prompt(
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(status_code=402, detail="OPENAI_API_KEY not set. Use /pipeline/from-png for offline mode.")
-    if not HAS_OPENAI:
-        raise HTTPException(status_code=500, detail="OpenAI image step unavailable.")
 
     _log.info("Prompt (pipeline) — %r", prompt.strip()[:500])
 
@@ -983,8 +1059,8 @@ async def pipeline_from_prompt(
 
     OPENAI_INFLIGHT.inc()
     try:
-        await anyio.to_thread.run_sync(generate_outline_png, prompt, str(png_path))
-    except OpenAIError as e:
+        await anyio.to_thread.run_sync(_generate_outline_png, prompt, str(png_path))
+    except _openai_error_cls() as e:
         status = getattr(e, "status_code", 500) or 500
         detail = _openai_detail(e)
         logging.warning(
@@ -1055,8 +1131,6 @@ async def outline_from_prompt(
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(status_code=402, detail="OPENAI_API_KEY not set. Cannot generate prompt image.")
-    if not HAS_OPENAI:
-        raise HTTPException(status_code=500, detail="OpenAI image step unavailable.")
 
     _log.info("Prompt (outline) — %r", prompt.strip()[:500])
 
@@ -1066,8 +1140,8 @@ async def outline_from_prompt(
 
     OPENAI_INFLIGHT.inc()
     try:
-        await anyio.to_thread.run_sync(generate_outline_png, prompt, str(png_path))
-    except OpenAIError as e:
+        await anyio.to_thread.run_sync(_generate_outline_png, prompt, str(png_path))
+    except _openai_error_cls() as e:
         status = getattr(e, "status_code", 500) or 500
         detail = _openai_detail(e)
         logging.warning(
