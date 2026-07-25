@@ -340,6 +340,12 @@
     .btn-primary:hover { background: var(--accent-hover); }
     .btn-secondary { background: var(--surface); color: var(--text); border-color: var(--border-strong); }
     .btn-secondary:hover { background: var(--surface-2); }
+    /* Step 2's controls only take effect once the button is pressed, so say so
+       the moment something changes — otherwise moving a slider looks like it
+       did nothing. */
+    .btn.pending { background: var(--accent); color: var(--accent-text-on); border-color: transparent; }
+    .btn.pending:hover { background: var(--accent-hover); }
+    .btn.pending::before { content: "↻ "; }
     .btn-lg { padding: 14px 16px; font-size: 15.5px; }
     .btn.busy { color: transparent !important; pointer-events: none; }
     .btn.busy::after {
@@ -1175,6 +1181,23 @@ $('width').addEventListener('input', () => {
   if (mode === 'stl') stlWidthAutoLocked = true;
 });
 
+// Changing a step-2 control does nothing until "Update outline" is pressed.
+// Flag the button so that is obvious, and clear it once the trace is redone.
+function markTraceDirty() {
+  const btn = $('btnTrace');
+  if (btn.disabled) return;                 // grid jobs: exact geometry, nothing to re-trace
+  btn.classList.add('pending');
+  btn.textContent = 'Update outline to apply';
+}
+function clearTraceDirty() {
+  const btn = $('btnTrace');
+  btn.classList.remove('pending');
+  btn.textContent = 'Update outline';
+}
+['thr', 'simp', 'smooth', 'topology'].forEach((id) => {
+  $(id).addEventListener('input', markTraceDirty);
+});
+
 function setStep2Enabled(enabled) {
   ['thr', 'simp', 'smooth', 'topology'].forEach((id) => { $(id).disabled = !enabled; });
   $('btnTrace').disabled = !enabled;
@@ -1210,9 +1233,17 @@ function applyTopologyResponse(data) {
 }
 
 /* ── Previews & downloads ─────────────────────────────────────────────── */
+// Re-tracing rewrites {name}.svg and regenerating rewrites {name}.stl, both at
+// the URL they already had. A cached copy therefore looks identical no matter
+// what settings were changed — which reads as the settings doing nothing. The
+// server sends no-cache, and this defeats any proxy in between as well.
+let previewVersion = 0;
+const fresh = (url) => `${url}${url.includes('?') ? '&' : '?'}v=${previewVersion}`;
+
 function updatePreviews(obj) {
+  previewVersion += 1;
   if (obj && obj.png) {
-    $('pngPreview').innerHTML = `<img src="${esc(obj.png)}" alt="Source image preview">`;
+    $('pngPreview').innerHTML = `<img src="${esc(fresh(obj.png))}" alt="Source image preview">`;
   }
   if (obj && obj.grid_spec) {
     const s = obj.grid_spec;
@@ -1222,10 +1253,10 @@ function updatePreviews(obj) {
       pickedStlName ? `${pickedStlName} — shown in the 3D preview in step 3.` : '3D model loaded — see the 3D preview in step 3.');
   }
   if (obj && obj.svg) {
-    $('svgPreview').innerHTML = `<img src="${esc(obj.svg)}" alt="Traced outline preview">`;
+    $('svgPreview').innerHTML = `<img src="${esc(fresh(obj.svg))}" alt="Traced outline preview">`;
   }
   const stlUrl = obj && (obj.stl || obj.source_stl);
-  if (stlUrl) loadStl(stlUrl, !obj.stl);
+  if (stlUrl) loadStl(fresh(stlUrl), !obj.stl);
 }
 
 const LINK_LABELS = {
@@ -1567,6 +1598,7 @@ async function runStep1() {
     lastJobId = data.job_id || lastJobId;
     applyTopologyResponse(data);
     updatePreviews(data);
+    clearTraceDirty();   // step 1 traced with the current settings already
     setPill(1, 'Done ✓', 'ok');
     if (!hasScrolledToStep2 && !reducedMotion.matches) {
       hasScrolledToStep2 = true;
@@ -1671,6 +1703,7 @@ $('btnTrace').addEventListener('click', () => withBusy($('btnTrace'), async () =
     });
     applyTopologyResponse(data);
     updatePreviews(data);
+    clearTraceDirty();
     setPill(2, 'Updated ✓', 'ok');
     if (data.warning) showAlert('alert2', 'warn', esc(data.warning));
   } catch (e) {

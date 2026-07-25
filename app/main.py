@@ -1452,4 +1452,10 @@ def get_file(job_id: str, filename: str):
     path = _confined_path(job_id, filename)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path)
+    # These paths are stable but their contents are not: re-tracing a job
+    # rewrites {name}.svg, and regenerating rewrites {name}.stl. Without this
+    # the browser applies heuristic caching and keeps showing the previous
+    # trace, which looks exactly like the settings having no effect.
+    # "no-cache" still allows a conditional request — the ETag makes an
+    # unchanged file a cheap 304.
+    return FileResponse(path, headers={"Cache-Control": "no-cache, must-revalidate"})
