@@ -159,3 +159,42 @@ def test_concurrency_guard_disabled_when_zero(tmp_path, monkeypatch):
             data={"name": "grid", "cols": "2", "rows": "2", "cell_w_mm": "30"},
         )
         assert r.status_code == 200
+
+
+# ── Job artifacts must not be cached ──────────────────────────────────────────
+
+def test_job_files_are_revalidated(client):
+    """{name}.svg and {name}.stl are rewritten in place by a re-trace or a
+    regenerate. Without a no-cache header the browser keeps showing the
+    previous result, which looks exactly like the settings having no effect."""
+    r = client.post("/trace/from-grid", data={"name": "g", "cols": "2", "rows": "2", "cell_w_mm": "30"})
+    svg_url = r.json()["svg"]
+    resp = client.get(svg_url)
+    assert resp.status_code == 200
+    assert "no-cache" in resp.headers.get("Cache-Control", "").lower()
+
+
+def test_retrace_serves_the_new_content(client):
+    """End to end: a different simplify tolerance must reach the served SVG."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("L", (256, 256), color=255)
+    ImageDraw.Draw(img).ellipse([40, 40, 216, 216], fill=0)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+
+    r = client.post(
+        "/trace/from-png",
+        data={"name": "c", "simplify": "0.02"},
+        files={"file": ("a.png", buf.getvalue(), "image/png")},
+    )
+    job_id = r.json()["job_id"]
+    coarse = client.get(r.json()["svg"]).text
+
+    r2 = client.post("/trace/from-job", data={"job_id": job_id, "name": "c", "simplify": "0.0002"})
+    fine = client.get(r2.json()["svg"]).text
+
+    # A circle traced finely has many more segments than one traced coarsely.
+    assert fine.count(" L ") > coarse.count(" L ") * 2, (coarse.count(" L "), fine.count(" L "))
