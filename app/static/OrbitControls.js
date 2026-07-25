@@ -285,14 +285,18 @@
 
       function onPointerDown(event) {
         if (!scope.enabled) return;
-        event.preventDefault();
+        // Only mouse/pen are driven through pointer events; touch is handled by
+        // the touch listeners below. Calling preventDefault or capturing the
+        // pointer for a touch would swallow the browser's own scroll gesture,
+        // which strands the user on a page where the viewer fills the screen.
         switch (event.pointerType) {
           case "mouse":
           case "pen":
+            event.preventDefault();
+            scope.domElement.setPointerCapture(event.pointerId);
             onMouseDown(event);
             break;
         }
-        scope.domElement.setPointerCapture(event.pointerId);
       }
       function onMouseDown(event) {
         let mouseAction;
@@ -338,7 +342,11 @@
         }
       }
       function onPointerUp(event) {
-        scope.domElement.releasePointerCapture(event.pointerId);
+        // Only mouse/pen are ever captured, and releasing an uncaptured
+        // pointer throws.
+        if (event.pointerType === "mouse" || event.pointerType === "pen") {
+          try { scope.domElement.releasePointerCapture(event.pointerId); } catch (e) {}
+        }
         state = STATE.NONE;
       }
       function onPointerCancel() {
@@ -358,12 +366,61 @@
         event.preventDefault();
       }
 
+      // Touch support. The handleTouch* helpers above already existed but
+      // nothing called them, so the viewer was inert on phones. These
+      // listeners are deliberately passive: they never call preventDefault,
+      // so the browser's own gesture handling always wins. Combined with
+      // `touch-action: pan-y` on the canvas that means a vertical swipe
+      // scrolls the page while a sideways drag rotates the model, and two
+      // fingers pinch to zoom.
+      function onTouchStart(event) {
+        if (!scope.enabled) return;
+        switch (event.touches.length) {
+          case 1:
+            if (scope.enableRotate === false) { state = STATE.NONE; return; }
+            handleTouchStartRotate(event);
+            state = STATE.TOUCH_ROTATE;
+            break;
+          case 2:
+            if (scope.enableZoom === false && scope.enablePan === false) { state = STATE.NONE; return; }
+            handleTouchStartDollyPan(event);
+            state = STATE.TOUCH_DOLLY_PAN;
+            break;
+          default:
+            state = STATE.NONE;
+        }
+      }
+      function onTouchMove(event) {
+        if (!scope.enabled) return;
+        switch (state) {
+          case STATE.TOUCH_ROTATE:
+            if (scope.enableRotate === false || event.touches.length !== 1) return;
+            handleTouchMoveRotate(event);
+            scope.update();
+            break;
+          case STATE.TOUCH_DOLLY_PAN:
+            if (event.touches.length !== 2) return;
+            handleTouchMoveDollyPan(event);
+            scope.update();
+            break;
+          default:
+            state = STATE.NONE;
+        }
+      }
+      function onTouchEnd() {
+        state = STATE.NONE;
+      }
+
       scope.domElement.addEventListener("contextmenu", onContextMenu);
       scope.domElement.addEventListener("pointerdown", onPointerDown);
       scope.domElement.addEventListener("pointercancel", onPointerCancel);
       scope.domElement.addEventListener("wheel", onMouseWheel, { passive: false });
       scope.domElement.addEventListener("pointermove", onPointerMove);
       scope.domElement.addEventListener("pointerup", onPointerUp);
+      scope.domElement.addEventListener("touchstart", onTouchStart, { passive: true });
+      scope.domElement.addEventListener("touchmove", onTouchMove, { passive: true });
+      scope.domElement.addEventListener("touchend", onTouchEnd, { passive: true });
+      scope.domElement.addEventListener("touchcancel", onTouchEnd, { passive: true });
       window.addEventListener("keydown", onKeyDown);
 
       this.update();

@@ -397,7 +397,11 @@
       background:
         radial-gradient(circle at 30% 20%, color-mix(in srgb, var(--surface) 60%, var(--surface-2)), var(--surface-2));
     }
-    #stlCanvas { display: block; width: 100%; height: 100%; }
+    /* pan-y hands vertical swipes back to the page. Without it OrbitControls
+       swallows every touch, so a finger landing on the viewer while scrolling
+       spins the model instead — leaving the page stuck. Horizontal drags still
+       rotate. */
+    #stlCanvas { display: block; width: 100%; height: 100%; touch-action: pan-y; }
     .viewer-wrap { height: clamp(360px, 46vw, 560px); }
     .viewer-placeholder {
       position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px;
@@ -439,6 +443,51 @@
       .step-body { padding: 16px; }
       .tab { min-width: 72px; font-size: 12.5px; padding: 8px 6px; }
     }
+    /* On the narrowest phones the status pill squeezes the heading into one
+       word per line — let it drop below instead. */
+    @media (max-width: 460px) {
+      .step-head { flex-wrap: wrap; row-gap: 6px; }
+      .step-head h2 { flex: 1 1 auto; min-width: 0; }
+      .step-head .pill { margin-left: 40px; }
+      .brand h1 { font-size: 19px; }
+    }
+    /* ── Touch devices ─────────────────────────────────────────────────────
+       Fingers are not cursors: targets need ~44px (Apple HIG / WCAG 2.5.5),
+       and iOS Safari zooms the page whenever a focused field is under 16px. */
+    @media (pointer: coarse) {
+      /* Stop iOS auto-zooming on focus. */
+      input[type="text"], input[type="number"], textarea, select { font-size: 16px; min-height: 44px; }
+
+      /* Keep the slider track slim but make the whole strip grabbable. */
+      input[type="range"] { height: 44px; }
+
+      .tab { min-height: 44px; }
+      .btn { min-height: 48px; }
+      summary, details.hint > summary { min-height: 44px; align-items: center; }
+      .icon-btn { width: 44px; height: 44px; }
+      .chip { min-height: 44px; display: inline-flex; align-items: center; }
+
+      /* The little "?" stays visually small but gets a finger-sized hit area. */
+      .tip { font-size: 12px; width: 18px; height: 18px; }
+      .tip::before { content: ""; position: absolute; inset: -13px; border-radius: 50%; }
+
+      /* Tooltips are hover-based on desktop; on touch the tap focuses the
+         element, so mirror the hover styling onto :focus. */
+      .tip:focus::after { opacity: 1; }
+
+      .check-row label { min-height: 44px; }
+      input[type="checkbox"] { width: 22px; height: 22px; }
+
+      .dl-minor { gap: 10px 18px; }
+      .dl-minor a { padding: 10px 2px; }
+      .site-foot { gap: 8px; }
+      .site-foot a { padding: 12px 0; display: inline-block; min-height: 44px; line-height: 20px; }
+
+      /* Secondary text was sized for a desktop viewing distance. */
+      .pill, .unit { font-size: 12.5px; }
+      .micro, .dz-sub { font-size: 13px; }
+    }
+
     @media (prefers-reduced-motion: reduce) {
       html { scroll-behavior: auto; }
       * { transition: none !important; animation-duration: .01s !important; }
@@ -538,14 +587,14 @@
                   <label for="gridCols">Columns</label>
                   <span class="tip" tabindex="0" data-tip="Number of cells across (1–40).">?</span>
                 </div>
-                <input id="gridCols" type="number" min="1" max="40" step="1" value="3" />
+                <input id="gridCols" type="number" inputmode="numeric" min="1" max="40" step="1" value="3" />
               </div>
               <div class="field">
                 <div class="field-head">
                   <label for="gridRows">Rows</label>
                   <span class="tip" tabindex="0" data-tip="Number of cells down (1–40).">?</span>
                 </div>
-                <input id="gridRows" type="number" min="1" max="40" step="1" value="4" />
+                <input id="gridRows" type="number" inputmode="numeric" min="1" max="40" step="1" value="4" />
               </div>
             </div>
             <div class="field-row">
@@ -554,14 +603,14 @@
                   <label for="gridCellW">Cell width (mm)</label>
                   <span class="tip" tabindex="0" data-tip="Spacing between wall centerlines. Each opening is one wall thickness smaller.">?</span>
                 </div>
-                <input id="gridCellW" type="number" min="5" max="300" step="0.5" value="30" />
+                <input id="gridCellW" type="number" inputmode="decimal" min="5" max="300" step="0.5" value="30" />
               </div>
               <div class="field">
                 <div class="field-head">
                   <label for="gridCellH">Cell height (mm)</label>
                   <span class="tip" tabindex="0" data-tip="Vertical spacing between wall centerlines. Match the width for square cells.">?</span>
                 </div>
-                <input id="gridCellH" type="number" min="5" max="300" step="0.5" value="30" />
+                <input id="gridCellH" type="number" inputmode="decimal" min="5" max="300" step="0.5" value="30" />
               </div>
             </div>
             <p class="micro" id="gridSummary" style="margin-top:10px;"></p>
@@ -1831,9 +1880,13 @@ async function loadStl(url, isSourceModel) {
       fitCameraToObject(stlMesh);
 
       $('viewerPlaceholder').style.display = 'none';
+      // On touch, vertical swipes are reserved for scrolling the page (see
+      // touch-action on the canvas), so say what actually works.
+      const touch = window.matchMedia('(pointer: coarse)').matches;
+      const how = touch ? 'Swipe sideways to rotate · pinch to zoom' : 'Drag to rotate · scroll to zoom';
       status.textContent = isSourceModel
-        ? 'Your uploaded model — generate in step 3 to see the cutter. Drag to rotate.'
-        : 'Drag to rotate · scroll to zoom';
+        ? `Your uploaded model — generate in step 3 to see the cutter. ${how}`
+        : how;
     }, undefined, () => {
       status.textContent = 'Could not load the 3D preview — the STL still downloads fine.';
     });
