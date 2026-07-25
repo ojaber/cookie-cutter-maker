@@ -1181,22 +1181,64 @@ const LINK_LABELS = {
   png: 'Image (PNG)',
   source_stl: 'Original model (STL)',
 };
+// Generated files live on an ephemeral disk that is wiped whenever the free
+// instance restarts, which would leave these links pointing at nothing. Pull
+// each artifact into memory once and repoint the link at a blob: URL, so a
+// download keeps working no matter what the server does afterwards.
+let heldBlobUrls = [];
+function releaseHeldBlobs() {
+  heldBlobUrls.forEach((u) => URL.revokeObjectURL(u));
+  heldBlobUrls = [];
+}
+
+function fileNameFrom(url, fallback) {
+  const base = String(url).split('/').pop();
+  return base && base.includes('.') ? base : fallback;
+}
+
+async function holdArtifacts(anchors) {
+  await Promise.all(anchors.map(async ({ el, url, name }) => {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) return;                       // keep the server URL as-is
+      const blobUrl = URL.createObjectURL(await r.blob());
+      heldBlobUrls.push(blobUrl);
+      el.href = blobUrl;
+      // blob: URLs carry no filename, so it must be stated explicitly or the
+      // browser saves the download under a random id.
+      el.download = name;
+    } catch (e) {
+      /* offline or server gone — the original link stays, nothing is worse off */
+    }
+  }));
+}
+
 function buildDownloads(obj) {
   const links = $('links');
   links.innerHTML = '';
+  releaseHeldBlobs();
   if (!obj) { $('resultPanel').hidden = true; return; }
   if (obj.job_id) lastJobId = obj.job_id;
   if (!obj.stl) return;  // only show the panel for generated cutters
 
+  const pending = [];
+  const addLink = (el, url, fallbackName) => {
+    el.href = url;
+    el.download = fileNameFrom(url, fallbackName);
+    pending.push({ el, url, name: el.download });
+  };
+
   const stlA = document.createElement('a');
-  stlA.href = obj.stl; stlA.className = 'btn btn-primary'; stlA.setAttribute('download', '');
+  stlA.className = 'btn btn-primary';
   stlA.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 5-5m-5 5-5-5"/><path d="M4 21h16"/></svg> Download STL';
+  addLink(stlA, obj.stl, 'cookie_cutter.stl');
   links.appendChild(stlA);
 
   if (obj.zip && typeof obj.zip === 'string') {
     const zipA = document.createElement('a');
-    zipA.href = obj.zip; zipA.className = 'btn btn-secondary'; zipA.setAttribute('download', '');
+    zipA.className = 'btn btn-secondary';
     zipA.textContent = 'Everything (.zip)';
+    addLink(zipA, obj.zip, 'cookie_cutter.zip');
     links.appendChild(zipA);
   }
 
@@ -1206,7 +1248,8 @@ function buildDownloads(obj) {
     const v = obj[k];
     if (typeof v === 'string' && v.startsWith('/files/')) {
       const a = document.createElement('a');
-      a.href = v; a.setAttribute('download', ''); a.textContent = label;
+      a.textContent = label;
+      addLink(a, v, `cookie_cutter.${k}`);
       minor.appendChild(a);
     }
   }
@@ -1215,6 +1258,10 @@ function buildDownloads(obj) {
   const panel = $('resultPanel');
   panel.hidden = false;
   if (obj.job_id) panel.title = `Job ${obj.job_id}`;
+
+  // Swap in the in-memory copies as they arrive; until then the server URLs
+  // work, so the buttons are never dead.
+  holdArtifacts(pending);
 }
 
 function setSizeSummary(data) {
