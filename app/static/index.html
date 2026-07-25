@@ -270,7 +270,18 @@
     }
     .unit { font-size: 11.5px; color: var(--text-3); font-weight: 600; }
     .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-    @media (max-width: 560px) { .field-row { grid-template-columns: 1fr; gap: 0; } }
+    /* Both columns start at the same y: the row supplies the spacing, so the
+       second .field must not also inherit the stacking margin. */
+    .field-row > .field { margin-top: 0; }
+    /* Reserve two lines of label height so a wrapped label ("Edge thickness")
+       doesn't push its slider below the neighbouring one. */
+    .field-row .field-head { min-height: 2.9em; }
+    @media (max-width: 560px) {
+      .field-row { grid-template-columns: 1fr; gap: 0; }
+      .field-row > .field { margin-top: 14px; }
+      .field-row > .field:first-child { margin-top: 0; }
+      .field-row .field-head { min-height: 0; }
+    }
 
     input[type="text"], input[type="number"], textarea, select {
       width: 100%; background: var(--surface); border: 1px solid var(--border-strong); color: var(--text);
@@ -1170,22 +1181,64 @@ const LINK_LABELS = {
   png: 'Image (PNG)',
   source_stl: 'Original model (STL)',
 };
+// Generated files live on an ephemeral disk that is wiped whenever the free
+// instance restarts, which would leave these links pointing at nothing. Pull
+// each artifact into memory once and repoint the link at a blob: URL, so a
+// download keeps working no matter what the server does afterwards.
+let heldBlobUrls = [];
+function releaseHeldBlobs() {
+  heldBlobUrls.forEach((u) => URL.revokeObjectURL(u));
+  heldBlobUrls = [];
+}
+
+function fileNameFrom(url, fallback) {
+  const base = String(url).split('/').pop();
+  return base && base.includes('.') ? base : fallback;
+}
+
+async function holdArtifacts(anchors) {
+  await Promise.all(anchors.map(async ({ el, url, name }) => {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) return;                       // keep the server URL as-is
+      const blobUrl = URL.createObjectURL(await r.blob());
+      heldBlobUrls.push(blobUrl);
+      el.href = blobUrl;
+      // blob: URLs carry no filename, so it must be stated explicitly or the
+      // browser saves the download under a random id.
+      el.download = name;
+    } catch (e) {
+      /* offline or server gone — the original link stays, nothing is worse off */
+    }
+  }));
+}
+
 function buildDownloads(obj) {
   const links = $('links');
   links.innerHTML = '';
+  releaseHeldBlobs();
   if (!obj) { $('resultPanel').hidden = true; return; }
   if (obj.job_id) lastJobId = obj.job_id;
   if (!obj.stl) return;  // only show the panel for generated cutters
 
+  const pending = [];
+  const addLink = (el, url, fallbackName) => {
+    el.href = url;
+    el.download = fileNameFrom(url, fallbackName);
+    pending.push({ el, url, name: el.download });
+  };
+
   const stlA = document.createElement('a');
-  stlA.href = obj.stl; stlA.className = 'btn btn-primary'; stlA.setAttribute('download', '');
+  stlA.className = 'btn btn-primary';
   stlA.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 5-5m-5 5-5-5"/><path d="M4 21h16"/></svg> Download STL';
+  addLink(stlA, obj.stl, 'cookie_cutter.stl');
   links.appendChild(stlA);
 
   if (obj.zip && typeof obj.zip === 'string') {
     const zipA = document.createElement('a');
-    zipA.href = obj.zip; zipA.className = 'btn btn-secondary'; zipA.setAttribute('download', '');
+    zipA.className = 'btn btn-secondary';
     zipA.textContent = 'Everything (.zip)';
+    addLink(zipA, obj.zip, 'cookie_cutter.zip');
     links.appendChild(zipA);
   }
 
@@ -1195,7 +1248,8 @@ function buildDownloads(obj) {
     const v = obj[k];
     if (typeof v === 'string' && v.startsWith('/files/')) {
       const a = document.createElement('a');
-      a.href = v; a.setAttribute('download', ''); a.textContent = label;
+      a.textContent = label;
+      addLink(a, v, `cookie_cutter.${k}`);
       minor.appendChild(a);
     }
   }
@@ -1204,6 +1258,10 @@ function buildDownloads(obj) {
   const panel = $('resultPanel');
   panel.hidden = false;
   if (obj.job_id) panel.title = `Job ${obj.job_id}`;
+
+  // Swap in the in-memory copies as they arrive; until then the server URLs
+  // work, so the buttons are never dead.
+  holdArtifacts(pending);
 }
 
 function setSizeSummary(data) {
@@ -1223,7 +1281,16 @@ function setSizeSummary(data) {
 /* ── Networking ───────────────────────────────────────────────────────── */
 // Photo extraction and large lattice meshing can take a couple of minutes on
 // a small instance — keep the client timeout generous.
-async function postForm(url, formData, timeoutMs = 180000) {
+// Raised when the server no longer has the job we're referring to. Free hosts
+// with an ephemeral disk (e.g. Render) lose every job directory whenever the
+// instance restarts or wakes from sleep, so this is expected, not exceptional —
+// callers recover by rebuilding the job from the source we still hold locally.
+class JobGoneError extends Error {}
+
+const JOB_GONE_HINTS = ['job_id not found', 'trace data for this job', 'no source image or stl'];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function postFormOnce(url, formData, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res;
@@ -1231,7 +1298,9 @@ async function postForm(url, formData, timeoutMs = 180000) {
     res = await fetch(url, { method: 'POST', body: formData, signal: controller.signal });
   } catch (e) {
     if (e.name === 'AbortError') throw new Error(`This is taking too long (over ${Math.round(timeoutMs / 1000)} s) — the server may be busy. Please try again.`);
-    throw new Error('Could not reach the server. Check your connection and try again.');
+    const err = new Error('Could not reach the server. Check your connection and try again.');
+    err.transient = true;
+    throw err;
   } finally {
     clearTimeout(timer);
   }
@@ -1241,9 +1310,34 @@ async function postForm(url, formData, timeoutMs = 180000) {
   if (!res.ok) {
     let msg = data.detail || 'Request failed';
     if (Array.isArray(msg)) msg = msg.map((d) => d.msg || JSON.stringify(d)).join('; ');
-    throw new Error(msg);
+    const lower = String(msg).toLowerCase();
+    if (res.status === 404 && JOB_GONE_HINTS.some((h) => lower.includes(h))) {
+      throw new JobGoneError(msg);
+    }
+    const err = new Error(msg);
+    // 502/503 come from a host still starting the app; a bare "Not Found" with
+    // no JSON body is the platform's own router answering while no instance is
+    // running. Both clear up on their own once the app is awake.
+    err.transient = res.status === 502 || res.status === 503 || res.status === 504
+      || (res.status === 404 && lower.trim() === 'not found');
+    throw err;
   }
   return data;
+}
+
+// Free instances sleep when idle and take up to a minute to wake, so retry the
+// transient failures that happen while that is in progress.
+async function postForm(url, formData, timeoutMs = 180000, { onWaking } = {}) {
+  const delays = [1500, 4000, 8000];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await postFormOnce(url, formData, timeoutMs);
+    } catch (e) {
+      if (!e.transient || attempt >= delays.length) throw e;
+      if (attempt === 0 && onWaking) onWaking();
+      await sleep(delays[attempt]);
+    }
+  }
 }
 
 function safeName() {
@@ -1309,6 +1403,93 @@ function showLocalImagePreview(file) {
   $('pngPreview').appendChild(img);
 }
 
+// True when the browser still holds enough to (re)build a job without asking
+// the user to pick their shape again.
+function hasLocalSource() {
+  if (mode === 'png') return !!$('file').files[0];
+  if (mode === 'stl') return !!$('fileStl').files[0];
+  if (mode === 'grid') return !!gridSpecFromInputs();
+  return !!$('prompt').value.trim();
+}
+
+// Create a server-side job from whatever source the user picked. The source
+// lives in the browser (a File, the grid inputs, the prompt box), so this can
+// be re-run at any time to rebuild a job the server has lost.
+async function createJob(opts) {
+  const waking = () => showAlert('alert1', 'info', 'Waking the server up — this can take up to a minute on the free plan…');
+  if (mode === 'png') {
+    const f = $('file').files[0];
+    if (!f) throw new Error('Choose an image first.');
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('name', safeName());
+    fd.append('threshold', $('thr').value);
+    fd.append('simplify', $('simp').value);
+    fd.append('smooth_radius', $('smooth').value);
+    traceParams(fd);
+    const data = await postForm('/trace/from-png', fd, 180000, { onWaking: waking, ...opts });
+    return { data, message: `Shape traced.${modeChip(data.extraction_mode)}${data.warning ? `<div class="mini-warn">⚠ ${esc(data.warning)}</div>` : ''}` };
+  }
+  if (mode === 'stl') {
+    const f = $('fileStl').files[0];
+    if (!f) throw new Error('Choose an STL file first.');
+    pickedStlName = f.name;
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('name', safeName());
+    fd.append('simplify', $('simp').value);
+    traceParams(fd);
+    const data = await postForm('/trace/from-stl', fd, 180000, { onWaking: waking, ...opts });
+    return { data, message: `Outline extracted from your model.${modeChip(data.extraction_mode)}${data.warning ? `<div class="mini-warn">⚠ ${esc(data.warning)}</div>` : ''}` };
+  }
+  if (mode === 'grid') {
+    const spec = gridSpecFromInputs();
+    if (!spec) throw new Error('Enter valid grid dimensions first (5–300 mm cells, up to 40×40).');
+    const fd = new FormData();
+    fd.append('name', safeName());
+    fd.append('cols', spec.cols);
+    fd.append('rows', spec.rows);
+    fd.append('cell_w_mm', spec.cw);
+    fd.append('cell_h_mm', spec.ch);
+    const data = await postForm('/trace/from-grid', fd, 180000, { onWaking: waking, ...opts });
+    return {
+      data,
+      message: `Grid built — ${data.cols}×${data.rows} cells, ${fmtMm(data.grid_width_mm)} × ${fmtMm(data.grid_height_mm)} mm.${modeChip(data.extraction_mode)}`,
+    };
+  }
+  const prompt = $('prompt').value.trim();
+  if (!prompt) throw new Error('Describe your shape first.');
+  const fd = new FormData();
+  fd.append('prompt', prompt);
+  fd.append('name', safeName());
+  const data = await postForm('/outline/from-prompt', fd, 180000, { onWaking: waking, ...opts });
+  return { data, message: `Outline drawn and traced.${modeChip(data.extraction_mode)}${data.warning ? `<div class="mini-warn">⚠ ${esc(data.warning)}</div>` : ''}` };
+}
+
+// Run an action that needs an existing job_id. If the server has forgotten the
+// job — which happens on every restart of a host with an ephemeral disk — the
+// job is silently rebuilt from the local source and the action retried once,
+// so a slider tweak never dead-ends on "job_id not found".
+async function withJobRecovery(alertRegion, run) {
+  if (!lastJobId) {
+    const { data } = await createJob();
+    lastJobId = data.job_id;
+    applyTopologyResponse(data);
+  }
+  try {
+    return await run(lastJobId);
+  } catch (e) {
+    if (!(e instanceof JobGoneError)) throw e;
+    showAlert(alertRegion, 'info', 'The server restarted and lost this job — rebuilding it from your original shape…');
+    const { data } = await createJob();
+    lastJobId = data.job_id;
+    applyTopologyResponse(data);
+    const result = await run(lastJobId);
+    clearAlert(alertRegion);
+    return result;
+  }
+}
+
 async function runStep1() {
   if (step1Busy) return;
   step1Busy = true;
@@ -1321,52 +1502,9 @@ async function runStep1() {
   }, 12000);
   try {
     setPreviewPlaceholder('svgPreview', 'Tracing…');
-    let data;
-    if (mode === 'png') {
-      const f = $('file').files[0];
-      if (!f) throw new Error('Choose an image first.');
-      const fd = new FormData();
-      fd.append('file', f);
-      fd.append('name', safeName());
-      fd.append('threshold', $('thr').value);
-      fd.append('simplify', $('simp').value);
-      fd.append('smooth_radius', $('smooth').value);
-      traceParams(fd);
-      data = await postForm('/trace/from-png', fd);
-      showAlert('alert1', 'ok', `Shape traced.${modeChip(data.extraction_mode)}${data.warning ? `<div class="mini-warn">⚠ ${esc(data.warning)}</div>` : ''}`);
-    } else if (mode === 'stl') {
-      const f = $('fileStl').files[0];
-      if (!f) throw new Error('Choose an STL file first.');
-      pickedStlName = f.name;
-      const fd = new FormData();
-      fd.append('file', f);
-      fd.append('name', safeName());
-      fd.append('simplify', $('simp').value);
-      traceParams(fd);
-      data = await postForm('/trace/from-stl', fd);
-      showAlert('alert1', 'ok', `Outline extracted from your model.${modeChip(data.extraction_mode)}${data.warning ? `<div class="mini-warn">⚠ ${esc(data.warning)}</div>` : ''}`);
-    } else if (mode === 'grid') {
-      const spec = gridSpecFromInputs();
-      if (!spec) throw new Error('Enter valid grid dimensions first (5–300 mm cells, up to 40×40).');
-      const fd = new FormData();
-      fd.append('name', safeName());
-      fd.append('cols', spec.cols);
-      fd.append('rows', spec.rows);
-      fd.append('cell_w_mm', spec.cw);
-      fd.append('cell_h_mm', spec.ch);
-      data = await postForm('/trace/from-grid', fd);
-      showAlert('alert1', 'ok',
-        `Grid built — ${data.cols}×${data.rows} cells, ${fmtMm(data.grid_width_mm)} × ${fmtMm(data.grid_height_mm)} mm.${modeChip(data.extraction_mode)}`);
-      renderGridPreview();
-    } else {
-      const prompt = $('prompt').value.trim();
-      if (!prompt) throw new Error('Describe your shape first.');
-      const fd = new FormData();
-      fd.append('prompt', prompt);
-      fd.append('name', safeName());
-      data = await postForm('/outline/from-prompt', fd);
-      showAlert('alert1', 'ok', `Outline drawn and traced.${modeChip(data.extraction_mode)}${data.warning ? `<div class="mini-warn">⚠ ${esc(data.warning)}</div>` : ''}`);
-    }
+    const { data, message } = await createJob();
+    showAlert('alert1', 'ok', message);
+    if (mode === 'grid') renderGridPreview();
     lastJobId = data.job_id || lastJobId;
     applyTopologyResponse(data);
     updatePreviews(data);
@@ -1454,20 +1592,24 @@ $('btnExample').addEventListener('click', async () => {
 /* ── Step 2: re-trace ─────────────────────────────────────────────────── */
 $('btnTrace').addEventListener('click', () => withBusy($('btnTrace'), async () => {
   try {
-    if (!lastJobId) throw new Error('Pick a shape in step 1 first.');
+    if (!lastJobId && !hasLocalSource()) throw new Error('Pick a shape in step 1 first.');
     clearAlert('alert2');
     setPill(2, 'Working…', 'busy');
     buildDownloads(null);
     setPreviewPlaceholder('svgPreview', 'Tracing…');
 
-    const fd = new FormData();
-    fd.append('job_id', lastJobId);
-    fd.append('name', safeName());
-    fd.append('threshold', $('thr').value);
-    fd.append('simplify', $('simp').value);
-    fd.append('smooth_radius', $('smooth').value);
-    traceParams(fd);
-    const data = await postForm('/trace/from-job', fd);
+    const data = await withJobRecovery('alert2', (jobId) => {
+      const fd = new FormData();
+      fd.append('job_id', jobId);
+      fd.append('name', safeName());
+      fd.append('threshold', $('thr').value);
+      fd.append('simplify', $('simp').value);
+      fd.append('smooth_radius', $('smooth').value);
+      traceParams(fd);
+      return postForm('/trace/from-job', fd, 180000, {
+        onWaking: () => showAlert('alert2', 'info', 'Waking the server up — this can take up to a minute on the free plan…'),
+      });
+    });
     applyTopologyResponse(data);
     updatePreviews(data);
     setPill(2, 'Updated ✓', 'ok');
@@ -1482,16 +1624,20 @@ $('btnTrace').addEventListener('click', () => withBusy($('btnTrace'), async () =
 /* ── Step 3: generate ─────────────────────────────────────────────────── */
 $('btnRun').addEventListener('click', () => withBusy($('btnRun'), async () => {
   try {
-    if (!lastJobId) throw new Error('Pick a shape in step 1 first.');
+    if (!lastJobId && !hasLocalSource()) throw new Error('Pick a shape in step 1 first.');
     clearAlert('alert3');
     setPill(3, 'Working…', 'busy');
     buildDownloads(null);
     $('stlStatus').textContent = 'Building your cutter…';
 
-    const fd = new FormData();
-    fd.append('job_id', lastJobId);
-    stlParams(fd);
-    const data = await postForm('/stl/from-job', fd);
+    const data = await withJobRecovery('alert3', (jobId) => {
+      const fd = new FormData();
+      fd.append('job_id', jobId);
+      stlParams(fd);
+      return postForm('/stl/from-job', fd, 180000, {
+        onWaking: () => showAlert('alert3', 'info', 'Waking the server up — this can take up to a minute on the free plan…'),
+      });
+    });
     applyTopologyResponse(data);
     updatePreviews(data);
     setSizeSummary(data);
