@@ -152,6 +152,11 @@ Free-tier trade-offs:
   photos on a plain background all still work.
 - The service **sleeps after ~15 min of inactivity** and takes ~1 minute to
   wake on the next visit (fine for a hobby/share link).
+- The disk is **ephemeral**: restarting or waking wipes every job directory,
+  so a `job_id` from before a restart no longer exists. The browser keeps your
+  source image/grid, so the UI rebuilds the job automatically and retries —
+  you should never see a "job not found" dead end. Download links from an
+  earlier session will stop working, though.
 
 Prefer more headroom (photo AI on, no sleep)? The app is a standard FastAPI
 service on port 8000, so any container or Python host works too — Google Cloud

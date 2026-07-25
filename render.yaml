@@ -25,3 +25,9 @@ services:
       # 512 MB is tight — run one heavy trace/mesh job at a time.
       - key: HEAVY_CONCURRENCY
         value: "1"
+      # Free instances have a small ephemeral disk that is wiped on every
+      # restart anyway, so hold visitors' uploads briefly rather than a full
+      # day: less to fill up, and less of other people's data sitting around.
+      # The UI transparently rebuilds a job whose files have gone.
+      - key: JOB_TTL_HOURS
+        value: "3"
