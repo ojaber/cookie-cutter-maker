@@ -414,6 +414,18 @@
       align-items: center; justify-content: center; color: var(--text-3); font-size: 13.5px;
       text-align: center; padding: 20px; pointer-events: none;
     }
+    /* The mesh on screen was built from the settings that were showing when it
+       was generated. Once they drift it is a picture of a different cutter, so
+       fade it and say so rather than letting it pass for the current one. */
+    .viewer-wrap.stale #stlCanvas { opacity: .35; }
+    .viewer-stale {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      padding: 20px; pointer-events: none;
+    }
+    .viewer-stale span {
+      background: var(--warn-soft); border: 1px solid var(--warn-border); color: var(--warn-ink);
+      border-radius: 999px; padding: 7px 14px; font-size: 12.5px; font-weight: 650; text-align: center;
+    }
 
     /* ── Result / downloads ────────────────────────────────────────────── */
     .result {
@@ -426,6 +438,14 @@
     .dl-row .btn { margin-top: 0; }
     .dl-minor { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 12.5px; }
     .dl-minor a { color: var(--text-2); }
+    /* Same story for the downloads: while the settings have drifted these
+       links still point at the previous cutter, so they are greyed out and
+       made unclickable instead of quietly handing over the wrong file. */
+    .result.stale { border-color: var(--warn-border); background: var(--warn-soft); }
+    .result.stale h3 { color: var(--warn-ink); }
+    .result.stale .dl-row { opacity: .45; }
+    .result.stale .dl-row a { pointer-events: none; }
+    .stale-note { font-size: 12.5px; color: var(--warn-ink); margin-top: 6px; }
 
     /* ── Footer ────────────────────────────────────────────────────────── */
     .site-foot {
@@ -891,19 +911,23 @@
           <div class="alert-region" id="alert3" aria-live="polite"></div>
 
           <div class="result" id="resultPanel" hidden>
-            <h3>Ready to print 🎉</h3>
+            <h3 id="resultTitle">Ready to print 🎉</h3>
             <p class="micro" id="sizeSummary"></p>
+            <p class="stale-note" id="staleNote" hidden></p>
             <div class="dl-row" id="links"></div>
           </div>
         </div>
 
         <aside class="viewer-card">
           <h3>3D preview</h3>
-          <div class="viewer-wrap">
+          <div class="viewer-wrap" id="viewerWrap">
             <canvas id="stlCanvas"></canvas>
             <div class="viewer-placeholder" id="viewerPlaceholder">
               <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg>
               <span>Generate your cutter to preview it here in 3D</span>
+            </div>
+            <div class="viewer-stale" id="viewerStale" hidden>
+              <span>Settings changed — regenerate to update this preview</span>
             </div>
           </div>
           <p class="micro center" id="stlStatus"></p>
@@ -1198,6 +1222,64 @@ function clearTraceDirty() {
   $(id).addEventListener('input', markTraceDirty);
 });
 
+// Step 3 has the same trap with sharper teeth. A cutter is built from the
+// settings that were on screen when it was generated, so changing one
+// afterwards leaves the panel offering the *previous* file while the sliders
+// read the new numbers — ask for 250 mm and the download still hands over the
+// 95 mm cutter, with nothing saying so. Say the result is out of date and take
+// the stale links away until it has been rebuilt.
+const STL_SETTING_IDS = [
+  'width', 'height', 'wall', 'name',
+  'bottomWall', 'cuttingWallH',
+  'flangeH', 'flangeOut', 'flangeChamfer', 'flangeCornerRadius', 'flangeAllLines',
+  'cleanup', 'tipSmooth', 'area', 'keepHoles',
+];
+let stlStale = false;
+
+// The mesh in the viewer is a separate question from the panel: re-tracing
+// throws the downloads away but leaves the old cutter sitting on screen, so
+// the two are marked independently.
+function setViewerStale(stale) {
+  $('viewerWrap').classList.toggle('stale', stale);
+  $('viewerStale').hidden = !stale;
+}
+
+function setPanelStale(stale) {
+  stlStale = stale;
+  const btn = $('btnRun');
+  btn.classList.toggle('pending', stale);
+  btn.textContent = stale ? 'Regenerate to apply' : 'Generate my cutter';
+  $('resultPanel').classList.toggle('stale', stale);
+  $('resultTitle').textContent = stale ? 'Settings changed' : 'Ready to print 🎉';
+  $('staleNote').textContent = stale
+    ? 'The download below is still the cutter you generated before — regenerate to rebuild it with the settings above.'
+    : '';
+  $('staleNote').hidden = !stale;
+  // The CSS keeps clicks off these; drop them out of the tab order too so a
+  // keyboard cannot reach a download that no longer matches the settings.
+  $('links').querySelectorAll('a').forEach((a) => {
+    if (stale) {
+      a.setAttribute('aria-disabled', 'true');
+      a.tabIndex = -1;
+    } else {
+      a.removeAttribute('aria-disabled');
+      a.tabIndex = 0;
+    }
+  });
+}
+
+function markStlDirty() {
+  // Nothing generated yet — "Generate my cutter" already says what it will do.
+  if (stlStale || $('resultPanel').hidden) return;
+  setPanelStale(true);
+  setViewerStale(true);
+  setPill(3, 'Needs regenerating', 'accent');
+}
+STL_SETTING_IDS.forEach((id) => {
+  const el = $(id);
+  el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', markStlDirty);
+});
+
 function setStep2Enabled(enabled) {
   ['thr', 'simp', 'smooth', 'topology'].forEach((id) => { $(id).disabled = !enabled; });
   $('btnTrace').disabled = !enabled;
@@ -1257,6 +1339,7 @@ function updatePreviews(obj) {
   }
   const stlUrl = obj && (obj.stl || obj.source_stl);
   if (stlUrl) loadStl(fresh(stlUrl), !obj.stl);
+  else setViewerStale(!!stlMesh);   // re-traced: the mesh on screen is from the old outline
 }
 
 const LINK_LABELS = {
@@ -1300,6 +1383,7 @@ function buildDownloads(obj) {
   const links = $('links');
   links.innerHTML = '';
   releaseHeldBlobs();
+  setPanelStale(false);   // whatever lands here matches the settings it was built from
   if (!obj) { $('resultPanel').hidden = true; return; }
   if (obj.job_id) lastJobId = obj.job_id;
   if (!obj.stl) return;  // only show the panel for generated cutters
@@ -1937,6 +2021,7 @@ async function loadStl(url, isSourceModel) {
       fitCameraToObject(stlMesh);
 
       $('viewerPlaceholder').style.display = 'none';
+      setViewerStale(false);
       // On touch, vertical swipes are reserved for scrolling the page (see
       // touch-action on the canvas), so say what actually works.
       const touch = window.matchMedia('(pointer: coarse)').matches;
