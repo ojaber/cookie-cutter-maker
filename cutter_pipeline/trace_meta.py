@@ -157,13 +157,12 @@ def _lattice_from_payload(raw: Any) -> LatticeGeometry:
         if any(b <= a for a, b in zip(nums, nums[1:])):
             raise ValueError(f"Invalid trace: lattice {key} must be strictly increasing.")
         lines[key] = nums
-    bounds = raw.get("bounds")
-    if not isinstance(bounds, list) or len(bounds) != 4:
-        raise ValueError("Invalid trace: lattice bounds must be 4 numbers.")
-    b = tuple(_finite(v, "bounds") for v in bounds)
-    if b[2] <= b[0] or b[3] <= b[1]:
-        raise ValueError("Invalid trace: lattice bounds are empty.")
-    return LatticeGeometry(x_lines=lines["x_lines"], y_lines=lines["y_lines"], bounds=b)
+    # The mesher scales by the bounds but draws walls from the lines, so posted
+    # bounds that disagree with the lines would build a cutter at the wrong
+    # size. Every trace the server produces has bounds spanning the first and
+    # last lines, so derive them rather than trust the payload.
+    x, y = lines["x_lines"], lines["y_lines"]
+    return LatticeGeometry(x_lines=x, y_lines=y, bounds=(x[0], y[0], x[-1], y[-1]))
 
 
 def trace_result_from_payload(data: Any) -> TraceResult:

@@ -509,8 +509,8 @@ def test_generate_accepts_a_minimal_hand_written_trace(client):
     ({"topology": "single", "polygon": {"type": "Polygon", "coordinates": [[[0, 0], [1e12, 0], [1, 1], [0, 0]]]}}, "out of range"),
     # A bow-tie: self-intersecting, so not a shape a cutter can be built from.
     ({"topology": "single", "polygon": {"type": "Polygon", "coordinates": [[[0, 0], [1, 1], [1, 0], [0, 1], [0, 0]]]}}, "valid shape"),
-    ({"topology": "lattice", "lattice": {"x_lines": [0, 1], "y_lines": [1, 0], "bounds": [0, 0, 1, 1]}}, "increasing"),
-    ({"topology": "lattice", "lattice": {"x_lines": list(range(500)), "y_lines": [0, 1], "bounds": [0, 0, 1, 1]}}, "x_lines"),
+    ({"topology": "lattice", "lattice": {"x_lines": [0, 1], "y_lines": [1, 0]}}, "increasing"),
+    ({"topology": "lattice", "lattice": {"x_lines": list(range(500)), "y_lines": [0, 1]}}, "x_lines"),
     ({"topology": "lattice", "grid_spec": {"cols": 500, "rows": 2, "cell_w_mm": 30, "cell_h_mm": 30}}, "Grid must be"),
 ])
 def test_generate_rejects_malformed_traces(client, trace, fragment):
@@ -548,6 +548,19 @@ def test_grid_trace_is_rebuilt_from_its_spec(client):
     r = _generate(client, trace, flange_out_mm="0", wall_mm="1.4")
     assert r.status_code == 200, r.text
     assert _extent_x(r.content) == pytest.approx(61.4, abs=0.2)
+
+
+def test_lattice_bounds_come_from_the_lines(client):
+    """The mesher scales by the bounds but draws walls from the lines, so a
+    posted trace whose bounds disagree with its lines must not be able to blow
+    the cutter up to many times the requested width."""
+    trace = {
+        "topology": "lattice",
+        "lattice": {"x_lines": [0, 500, 1000], "y_lines": [0, 500, 1000], "bounds": [0, 0, 1, 1]},
+    }
+    r = _generate(client, trace, width_mm="80", flange_out_mm="0", wall_mm="1.4")
+    assert r.status_code == 200, r.text
+    assert _extent_x(r.content) == pytest.approx(81.4, abs=0.5)
 
 
 def test_job_routes_are_gone(client):
