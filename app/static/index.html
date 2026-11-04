@@ -2004,6 +2004,11 @@ async function loadStl(url, isSourceModel) {
       const mat = new THREE.MeshStandardMaterial({
         color: new THREE.Color(viewerCssColor('--viewer-mesh', '#cf8a43')),
         metalness: 0.08, roughness: 0.42,
+        // Draw back faces too. Uploaded models come with whatever winding
+        // their exporter felt like, and a single flipped or missing triangle
+        // otherwise reads as a hole with the page showing through it, which
+        // looks like a broken cutter rather than a rendering artefact.
+        side: THREE.DoubleSide,
       });
       stlMesh = new THREE.Mesh(geom, mat);
       stlMesh.rotation.x = -Math.PI / 2;

@@ -95,7 +95,10 @@ def _create_chamfer(
 
     if not meshes:
         return None
-    return trimesh.util.concatenate(meshes)
+    # Union rather than concatenate: the slices only touch face to face, so
+    # gluing them leaves shared edges with four faces on them and the brace is
+    # not one solid.
+    return _union_solids(meshes)
 
 
 def _align_ring_phase(reference: np.ndarray, ring: np.ndarray) -> np.ndarray:
@@ -263,30 +266,53 @@ def polygon_to_cookie_cutter_stl(
             inner_ids.append(add_ring(inner_ring, bevel_start_z))
         inner_ids.append(add_ring(inner_ring, total_h_mm))
 
+        # Close the gap between the outer and inner rings at each end. Without
+        # these the body is a bare tube: the boolean union below refuses an
+        # open mesh, quietly falls back to gluing the wall, flange and chamfer
+        # together as three overlapping shells, and the exported STL is left
+        # with a hole you can see straight through in any viewer that culls
+        # back faces.
+        def annulus(outer_off: int, inner_off: int, outer_xy, inner_xy, flip: bool):
+            # The inner ring is wound opposite the outer one, which is what
+            # keeps the wall normals facing the right way. Matching the two
+            # index-for-index would therefore twist the cap into a bowtie, so
+            # walk the inner ring backwards from whichever vertex sits nearest
+            # the start of the outer one.
+            k = int(np.argmin(np.linalg.norm(inner_xy - outer_xy[0], axis=1)))
+            out = []
+            for i in range(samples):
+                a0 = outer_off + i
+                a1 = outer_off + ((i + 1) % samples)
+                b0 = inner_off + ((k - i) % samples)
+                b1 = inner_off + ((k - i - 1) % samples)
+                if not flip:
+                    out.append([a0, a1, b1])
+                    out.append([a0, b1, b0])
+                else:
+                    out.append([a0, b1, a1])
+                    out.append([a0, b0, b1])
+            return out
+
         faces = []
         for a, b in zip(outer_ids, outer_ids[1:]):
             faces += strip(a, b, flip=False)
         for a, b in zip(inner_ids, inner_ids[1:]):
             faces += strip(b, a, flip=True)
+        # Bottom (sits on the bed) and top (the cutting edge).
+        faces += annulus(outer_ids[0], inner_ids[0], outer_ring, inner_ring, flip=True)
+        faces += annulus(outer_ids[-1], inner_ids[-1], outer_sections[-1][0], inner_ring, flip=False)
 
         verts = np.vstack([np.column_stack([r, np.full((samples, 1), z)]) for r, z in rings])
         body = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
     else:
-        # Build solid shells with caps, then drop caps to keep ends open.
+        # A polygon with a hole extrudes to a closed annular prism, caps
+        # included. Keep them: `_union_solids` needs every input to be a solid.
         extrude_kwargs = {"engine": "earcut"}
         body_poly = Polygon(scaled.exterior.coords, holes=[inner.exterior.coords])
         body = trimesh.creation.extrude_polygon(body_poly, total_h_mm, **extrude_kwargs)
 
     flange_poly = Polygon(outer_flange.exterior.coords, holes=[scaled.exterior.coords])
     flange = trimesh.creation.extrude_polygon(flange_poly, flange_h_mm, engine="earcut")
-
-    def drop_caps(m):
-        nz = m.face_normals[:, 2]
-        keep = np.abs(nz) < 0.99
-        return m.submesh([keep], append=True)
-
-    body = drop_caps(body)
-    # Don't drop caps from flange - it needs its top surface
 
     # Add a solid chamfer brace at the wall-to-flange junction if requested.
     parts_to_join = [body, flange]
