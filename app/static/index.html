@@ -1057,11 +1057,9 @@ const TABS = {
 };
 let mode = 'png';
 let step1Busy = false;
-let lastJobId = null;
 let stlWidthAutoLocked = false;
 let gridSpecSize = null;      // {w, h} exact mm when the job came from the Grid Builder
 let hasScrolledToStep2 = false;
-let pickedStlName = '';
 
 function setMode(m) {
   if (step1Busy) return;
@@ -1082,6 +1080,7 @@ function setMode(m) {
   }
   if (m === 'stl') stlWidthAutoLocked = false;
   if (m === 'grid') renderGridPreview();
+  else showSourcePreview();   // the grid preview may have replaced it
 }
 for (const key of Object.keys(TABS)) TABS[key].tab.addEventListener('click', () => setMode(key));
 
@@ -1132,7 +1131,11 @@ function renderGridPreview() {
   $('pngPreview').innerHTML = gridSvgMarkup(spec.cols, spec.rows, spec.cw, spec.ch);
 }
 ['gridCols', 'gridRows', 'gridCellW', 'gridCellH'].forEach((id) =>
-  $(id).addEventListener('input', renderGridPreview)
+  $(id).addEventListener('input', () => {
+    renderGridPreview();
+    // A cutter built from the grid no longer matches these numbers.
+    if (current && current.source.kind === 'grid') markStlDirty();
+  })
 );
 renderGridPreview();
 
@@ -1187,7 +1190,6 @@ function setGridHint(msg) {
 }
 
 function applyDetectedStlWidth(data) {
-  if (mode !== 'stl') return;
   const width = Number(data && data.source_width_mm);
   if (!Number.isFinite(width) || width <= 0) return;
   const widthEl = $('width');
@@ -1311,124 +1313,213 @@ function applyTopologyResponse(data) {
   setStep2Enabled(!gridSpecSize);
   unlockSteps();
   setPill(2, 'Ready', 'accent');
-  if ($('pill3').textContent !== 'Done ✓') setPill(3, 'Ready', 'accent');
+  setPill(3, 'Ready', 'accent');   // a new outline means no cutter is built from it yet
 }
 
-/* ── Previews & downloads ─────────────────────────────────────────────── */
-// Re-tracing rewrites {name}.svg and regenerating rewrites {name}.stl, both at
-// the URL they already had. A cached copy therefore looks identical no matter
-// what settings were changed — which reads as the settings doing nothing. The
-// server sends no-cache, and this defeats any proxy in between as well.
-let previewVersion = 0;
-const fresh = (url) => `${url}${url.includes('?') ? '&' : '?'}v=${previewVersion}`;
+/* ── Session state ────────────────────────────────────────────────────── */
+// Everything the three steps need lives here, in the browser. The server keeps
+// nothing between requests: a trace comes back as data, and a cutter is built
+// by posting that data back, so there is no job for a restart to lose.
+//
+// `current` is the shape step 2 shows: where it came from (captured when it
+// was traced, so switching tabs or picking another file afterwards never
+// changes what Generate builds), the trace, and the settings it was traced
+// with. `cutter` is the last cutter built from it.
+let current = null;   // { source, data, trace, svg, traceKey }
+let cutter = null;    // { stl: Blob, name, info, stlKey }
 
-function updatePreviews(obj) {
-  previewVersion += 1;
-  if (obj && obj.png) {
-    $('pngPreview').innerHTML = `<img src="${esc(fresh(obj.png))}" alt="Source image preview">`;
+function traceSettingsKey() {
+  return JSON.stringify(['thr', 'simp', 'smooth', 'topology'].map((id) => $(id).value));
+}
+function stlSettingsKey() {
+  const fd = new FormData();
+  stlParams(fd);
+  return JSON.stringify([...fd.entries()]);
+}
+function sameGridSpec(a, b) {
+  return !!a && !!b && a.cols === b.cols && a.rows === b.rows && a.cw === b.cw && a.ch === b.ch;
+}
+
+/* ── Previews ─────────────────────────────────────────────────────────── */
+// Each preview gets a fresh blob: URL, so there is no cached copy of an older
+// trace to show by mistake.
+const previewUrls = {};
+function setPreviewImage(paneId, blob, alt) {
+  if (previewUrls[paneId]) URL.revokeObjectURL(previewUrls[paneId]);
+  const url = URL.createObjectURL(blob);
+  previewUrls[paneId] = url;
+  const img = new Image();
+  img.alt = alt;
+  img.src = url;
+  $(paneId).innerHTML = '';
+  $(paneId).appendChild(img);
+}
+
+function showLocalImagePreview(file) {
+  setPreviewImage('pngPreview', file, 'Source image preview');
+}
+
+function showSourcePreview() {
+  if (!current) return;
+  const src = current.source;
+  if (src.kind === 'png') showLocalImagePreview(src.file);
+  else if (src.kind === 'grid') $('pngPreview').innerHTML = gridSvgMarkup(src.spec.cols, src.spec.rows, src.spec.cw, src.spec.ch);
+  else setPreviewPlaceholder('pngPreview', `${src.file.name} — shown in the 3D preview in step 3.`);
+}
+
+function showOutlinePreview() {
+  if (current && current.svg) {
+    setPreviewImage('svgPreview', new Blob([current.svg], { type: 'image/svg+xml' }), 'Traced outline preview');
+  } else {
+    setPreviewPlaceholder('svgPreview', 'The traced outline shows up here');
   }
-  if (obj && obj.grid_spec) {
-    const s = obj.grid_spec;
-    $('pngPreview').innerHTML = gridSvgMarkup(s.cols, s.rows, s.cell_w_mm, s.cell_h_mm);
-  } else if (obj && (obj.source_stl || obj.stl) && !obj.png) {
-    setPreviewPlaceholder('pngPreview',
-      pickedStlName ? `${pickedStlName} — shown in the 3D preview in step 3.` : '3D model loaded — see the 3D preview in step 3.');
+}
+
+// The viewer keeps its own URL; the old one is released a little later so a
+// load that is still reading it is not cut off.
+let viewerUrl = null;
+function showInViewer(blob, isSourceModel) {
+  const old = viewerUrl;
+  viewerUrl = URL.createObjectURL(blob);
+  if (old) setTimeout(() => URL.revokeObjectURL(old), 30000);
+  loadStl(viewerUrl, isSourceModel);
+}
+
+function clearViewer() {
+  if (stlMesh) {
+    scene.remove(stlMesh);
+    stlMesh.geometry.dispose();
+    stlMesh = null;
   }
-  if (obj && obj.svg) {
-    $('svgPreview').innerHTML = `<img src="${esc(fresh(obj.svg))}" alt="Traced outline preview">`;
+  $('viewerPlaceholder').style.display = '';
+  $('stlStatus').textContent = '';
+  setViewerStale(false);
+}
+
+function lockSteps() {
+  for (const id of ['step2', 'step3']) {
+    const step = $(id);
+    step.dataset.locked = 'true';
+    step.querySelector('.step-body').setAttribute('inert', '');
   }
-  const stlUrl = obj && (obj.stl || obj.source_stl);
-  if (stlUrl) loadStl(fresh(stlUrl), !obj.stl);
-  else setViewerStale(!!stlMesh);   // re-traced: the mesh on screen is from the old outline
 }
 
-const LINK_LABELS = {
-  svg: 'Outline (SVG)',
-  png: 'Image (PNG)',
-  source_stl: 'Original model (STL)',
-};
-// Generated files live on an ephemeral disk that is wiped whenever the free
-// instance restarts, which would leave these links pointing at nothing. Pull
-// each artifact into memory once and repoint the link at a blob: URL, so a
-// download keeps working no matter what the server does afterwards.
-let heldBlobUrls = [];
-function releaseHeldBlobs() {
-  heldBlobUrls.forEach((u) => URL.revokeObjectURL(u));
-  heldBlobUrls = [];
+/* ── Downloads ────────────────────────────────────────────────────────── */
+// A ZIP with no compression: STLs barely shrink anyway, and this keeps the
+// whole thing to a few dozen lines instead of a library.
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+async function makeZip(entries) {
+  const enc = new TextEncoder();
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const parts = [], central = [];
+  let offset = 0;
+  for (const { name, blob } of entries) {
+    const data = new Uint8Array(await blob.arrayBuffer());
+    const nameBytes = enc.encode(name);
+    const crc = crc32(data);
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);
+    local.setUint16(4, 20, true);
+    local.setUint16(6, 0x0800, true);          // names are UTF-8
+    local.setUint16(8, 0, true);               // stored
+    local.setUint16(10, dosTime, true);
+    local.setUint16(12, dosDate, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, data.length, true);
+    local.setUint32(22, data.length, true);
+    local.setUint16(26, nameBytes.length, true);
+    parts.push(local, nameBytes, data);
+    const cen = new DataView(new ArrayBuffer(46));
+    cen.setUint32(0, 0x02014b50, true);
+    cen.setUint16(4, 20, true);
+    cen.setUint16(6, 20, true);
+    cen.setUint16(8, 0x0800, true);
+    cen.setUint16(12, dosTime, true);
+    cen.setUint16(14, dosDate, true);
+    cen.setUint32(16, crc, true);
+    cen.setUint32(20, data.length, true);
+    cen.setUint32(24, data.length, true);
+    cen.setUint16(28, nameBytes.length, true);
+    cen.setUint32(42, offset, true);
+    central.push(cen, nameBytes);
+    offset += 30 + nameBytes.length + data.length;
+  }
+  const centralSize = central.reduce((n, p) => n + p.byteLength, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true);
+  end.setUint16(8, entries.length, true);
+  end.setUint16(10, entries.length, true);
+  end.setUint32(12, centralSize, true);
+  end.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, end], { type: 'application/zip' });
 }
 
-function fileNameFrom(url, fallback) {
-  const base = String(url).split('/').pop();
-  return base && base.includes('.') ? base : fallback;
+let downloadUrls = [];
+function releaseDownloadUrls() {
+  downloadUrls.forEach((u) => URL.revokeObjectURL(u));
+  downloadUrls = [];
 }
 
-async function holdArtifacts(anchors) {
-  await Promise.all(anchors.map(async ({ el, url, name }) => {
-    try {
-      const r = await fetch(url);
-      if (!r.ok) return;                       // keep the server URL as-is
-      const blobUrl = URL.createObjectURL(await r.blob());
-      heldBlobUrls.push(blobUrl);
-      el.href = blobUrl;
-      // blob: URLs carry no filename, so it must be stated explicitly or the
-      // browser saves the download under a random id.
-      el.download = name;
-    } catch (e) {
-      /* offline or server gone — the original link stays, nothing is worse off */
-    }
-  }));
-}
-
-function buildDownloads(obj) {
+async function buildDownloads(c) {
   const links = $('links');
   links.innerHTML = '';
-  releaseHeldBlobs();
+  releaseDownloadUrls();
   setPanelStale(false);   // whatever lands here matches the settings it was built from
-  if (!obj) { $('resultPanel').hidden = true; return; }
-  if (obj.job_id) lastJobId = obj.job_id;
-  if (!obj.stl) return;  // only show the panel for generated cutters
+  if (!c) { $('resultPanel').hidden = true; return; }
 
-  const pending = [];
-  const addLink = (el, url, fallbackName) => {
+  const addLink = (el, blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    downloadUrls.push(url);
     el.href = url;
-    el.download = fileNameFrom(url, fallbackName);
-    pending.push({ el, url, name: el.download });
+    el.download = filename;   // blob: URLs carry no name of their own
+    return el;
   };
+  const svgBlob = current.svg ? new Blob([current.svg], { type: 'image/svg+xml' }) : null;
+  const sourceFile = current.source.file || null;
 
   const stlA = document.createElement('a');
   stlA.className = 'btn btn-primary';
   stlA.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 5-5m-5 5-5-5"/><path d="M4 21h16"/></svg> Download STL';
-  addLink(stlA, obj.stl, 'cookie_cutter.stl');
-  links.appendChild(stlA);
+  links.appendChild(addLink(stlA, c.stl, `${c.name}.stl`));
 
-  if (obj.zip && typeof obj.zip === 'string') {
-    const zipA = document.createElement('a');
-    zipA.className = 'btn btn-secondary';
-    zipA.textContent = 'Everything (.zip)';
-    addLink(zipA, obj.zip, 'cookie_cutter.zip');
-    links.appendChild(zipA);
-  }
+  const zipEntries = [{ name: `${c.name}.stl`, blob: c.stl }];
+  if (svgBlob) zipEntries.push({ name: `${c.name}.svg`, blob: svgBlob });
+  if (sourceFile) zipEntries.push({ name: sourceFile.name, blob: sourceFile });
+  zipEntries.push({ name: 'trace.json', blob: new Blob([JSON.stringify(current.trace)], { type: 'application/json' }) });
+  const zipA = document.createElement('a');
+  zipA.className = 'btn btn-secondary';
+  zipA.textContent = 'Everything (.zip)';
+  links.appendChild(addLink(zipA, await makeZip(zipEntries), `${c.name}.zip`));
 
   const minor = document.createElement('div');
   minor.className = 'dl-minor';
-  for (const [k, label] of Object.entries(LINK_LABELS)) {
-    const v = obj[k];
-    if (typeof v === 'string' && v.startsWith('/files/')) {
-      const a = document.createElement('a');
-      a.textContent = label;
-      addLink(a, v, `cookie_cutter.${k}`);
-      minor.appendChild(a);
-    }
+  if (svgBlob) {
+    const a = document.createElement('a');
+    a.textContent = 'Outline (SVG)';
+    minor.appendChild(addLink(a, svgBlob, `${c.name}.svg`));
+  }
+  if (sourceFile) {
+    const a = document.createElement('a');
+    a.textContent = current.source.kind === 'stl' ? 'Original model (STL)' : 'Original image';
+    minor.appendChild(addLink(a, sourceFile, sourceFile.name));
   }
   if (minor.children.length) links.appendChild(minor);
-
-  const panel = $('resultPanel');
-  panel.hidden = false;
-  if (obj.job_id) panel.title = `Job ${obj.job_id}`;
-
-  // Swap in the in-memory copies as they arrive; until then the server URLs
-  // work, so the buttons are never dead.
-  holdArtifacts(pending);
+  $('resultPanel').hidden = false;
 }
 
 function setSizeSummary(data) {
@@ -1455,73 +1546,73 @@ function setSizeSummary(data) {
 /* ── Networking ───────────────────────────────────────────────────────── */
 // Photo extraction and large lattice meshing can take a couple of minutes on
 // a small instance — keep the client timeout generous.
-// Raised when the server no longer has the job we're referring to. Free hosts
-// with an ephemeral disk (e.g. Render) lose every job directory whenever the
-// instance restarts or wakes from sleep, so this is expected, not exceptional —
-// callers recover by rebuilding the job from the source we still hold locally.
-class JobGoneError extends Error {}
-
-const JOB_GONE_HINTS = ['job_id not found', 'trace data for this job', 'no source image or stl'];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function postFormOnce(url, formData, timeoutMs) {
+async function postFormOnce(url, formData, timeoutMs, as) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res;
   try {
     res = await fetch(url, { method: 'POST', body: formData, signal: controller.signal });
-  } catch (e) {
-    if (e.name === 'AbortError') throw new Error(`This is taking too long (over ${Math.round(timeoutMs / 1000)} s) — the server may be busy. Please try again.`);
-    const err = new Error('Could not reach the server. Check your connection and try again.');
-    err.transient = true;
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch (e) { data = { detail: text }; }
-  if (!res.ok) {
+    if (res.ok && as === 'blob') {
+      let info = {};
+      try { info = JSON.parse(res.headers.get('X-Cutter-Info') || '{}'); } catch (e) { /* size summary is optional */ }
+      return { blob: await res.blob(), info };
+    }
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch (e) { data = { detail: text }; }
+    if (res.ok) return data;
     let msg = data.detail || 'Request failed';
     if (Array.isArray(msg)) msg = msg.map((d) => d.msg || JSON.stringify(d)).join('; ');
     const lower = String(msg).toLowerCase();
-    if (res.status === 404 && JOB_GONE_HINTS.some((h) => lower.includes(h))) {
-      throw new JobGoneError(msg);
-    }
     const err = new Error(msg);
     // 502/503 come from a host still starting the app; a bare "Not Found" with
     // no JSON body is the platform's own router answering while no instance is
-    // running. Both clear up on their own once the app is awake.
+    // running. Both clear up on their own once the app is awake. The app's own
+    // 503 means every worker is busy, which also clears up — but say so.
+    err.busy = res.status === 503 && lower.includes('busy');
     err.transient = res.status === 502 || res.status === 503 || res.status === 504
       || (res.status === 404 && lower.trim() === 'not found');
     throw err;
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error(`This is taking too long (over ${Math.round(timeoutMs / 1000)} s) — the server may be busy. Please try again.`);
+    if (e instanceof TypeError) {
+      const err = new Error('Could not reach the server. Check your connection and try again.');
+      err.transient = true;
+      throw err;
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return data;
 }
 
 // Free instances sleep when idle and take up to a minute to wake, so retry the
 // transient failures that happen while that is in progress.
-async function postForm(url, formData, timeoutMs = 180000, { onWaking } = {}) {
+async function postForm(url, formData, { timeoutMs = 180000, onWaking, as = 'json' } = {}) {
   const delays = [1500, 4000, 8000];
   for (let attempt = 0; ; attempt++) {
     try {
-      return await postFormOnce(url, formData, timeoutMs);
+      return await postFormOnce(url, formData, timeoutMs, as);
     } catch (e) {
       if (!e.transient || attempt >= delays.length) throw e;
-      if (attempt === 0 && onWaking) onWaking();
+      if (attempt === 0 && onWaking) onWaking(e);
       await sleep(delays[attempt]);
     }
   }
+}
+
+function wakingAlert(region) {
+  return (e) => showAlert(region, 'info', e && e.busy
+    ? 'The server is busy with other cutters — trying again in a moment…'
+    : 'Waking the server up — this can take up to a minute on the free plan…');
 }
 
 function safeName() {
   const raw = ($('name').value || '').trim();
   const cleaned = raw.replace(/\s+/g, '_').replace(/[^A-Za-z0-9._-]/g, '').replace(/^[._-]+/, '').slice(0, 64);
   return cleaned || 'cookie_cutter';
-}
-
-function traceParams(fd) {
-  fd.append('topology', $('topology').value || 'auto');
 }
 
 function stlParams(fd) {
@@ -1545,7 +1636,7 @@ function stlParams(fd) {
 }
 
 // Disable a button while its request runs so double-clicks don't queue
-// duplicate jobs on the server.
+// duplicate work on the server.
 async function withBusy(btn, fn) {
   if (btn.classList.contains('busy')) return;
   btn.classList.add('busy');
@@ -1560,6 +1651,85 @@ async function withBusy(btn, fn) {
   }
 }
 
+/* ── Tracing ──────────────────────────────────────────────────────────── */
+const warnHtml = (data) => (data.warning ? `<div class="mini-warn">⚠ ${esc(data.warning)}</div>` : '');
+
+function base64ToFile(b64, filename, type) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new File([bytes], filename, { type });
+}
+
+// Trace a source with the current step-2 settings. Used for the first trace
+// and for every re-trace: re-tracing just sends the source again.
+async function traceSource(source, alertRegion) {
+  const traceKey = traceSettingsKey();
+  const opts = { onWaking: wakingAlert(alertRegion) };
+  const fd = new FormData();
+  fd.append('name', safeName());
+  let data, message;
+  if (source.kind === 'png') {
+    fd.append('file', source.file);
+    fd.append('threshold', $('thr').value);
+    fd.append('simplify', $('simp').value);
+    fd.append('smooth_radius', $('smooth').value);
+    fd.append('topology', $('topology').value || 'auto');
+    data = await postForm('/trace/from-png', fd, opts);
+    message = `Shape traced.${modeChip(data.extraction_mode)}${warnHtml(data)}`;
+  } else if (source.kind === 'stl') {
+    fd.append('file', source.file);
+    fd.append('simplify', $('simp').value);
+    fd.append('topology', $('topology').value || 'auto');
+    data = await postForm('/trace/from-stl', fd, opts);
+    message = `Outline extracted from your model.${modeChip(data.extraction_mode)}${warnHtml(data)}`;
+  } else if (source.kind === 'grid') {
+    fd.append('cols', source.spec.cols);
+    fd.append('rows', source.spec.rows);
+    fd.append('cell_w_mm', source.spec.cw);
+    fd.append('cell_h_mm', source.spec.ch);
+    data = await postForm('/trace/from-grid', fd, opts);
+    message = `Grid built — ${data.cols}×${data.rows} cells, ${fmtMm(data.grid_width_mm)} × ${fmtMm(data.grid_height_mm)} mm.${modeChip(data.extraction_mode)}`;
+  } else {
+    fd.append('prompt', source.prompt);
+    data = await postForm('/outline/from-prompt', fd, opts);
+    // From here on the drawing is just an image the browser holds, so it
+    // re-traces and downloads exactly like an upload.
+    source = { kind: 'png', file: base64ToFile(data.png_base64, `${safeName()}.png`, 'image/png') };
+    message = `Outline drawn and traced.${modeChip(data.extraction_mode)}${warnHtml(data)}`;
+  }
+  return { source, data, trace: data.trace, svg: data.svg || '', traceKey, message };
+}
+
+// Make a fresh trace the shape everything else works from. Any cutter built
+// from the previous one no longer matches it, so that goes.
+function setCurrent(entry) {
+  current = entry;
+  cutter = null;
+  buildDownloads(null);
+  applyTopologyResponse(entry.data);
+  showSourcePreview();
+  showOutlinePreview();
+  if (entry.source.kind === 'stl') showInViewer(entry.source.file, true);
+  else if (stlMesh) setViewerStale(true);   // the mesh on screen is from the old outline
+}
+
+// No usable shape: put steps 2 and 3 back to how they start, so nothing can
+// build a cutter from a picture that is no longer on screen.
+function clearCurrent() {
+  current = null;
+  cutter = null;
+  buildDownloads(null);
+  clearViewer();
+  setPreviewPlaceholder('svgPreview', 'The traced outline shows up here');
+  setTopologyBadge(null);
+  setGridHint('');
+  clearTraceDirty();
+  lockSteps();
+  setPill(2, 'Waiting for a shape', '');
+  setPill(3, 'Waiting for a shape', '');
+}
+
 /* ── Step 1: choose a shape ───────────────────────────────────────────── */
 function setDzFile(id, nameText) {
   const el = $(id);
@@ -1567,121 +1737,41 @@ function setDzFile(id, nameText) {
   el.classList.toggle('show', !!nameText);
 }
 
-function showLocalImagePreview(file) {
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  img.alt = 'Source image preview';
-  img.onload = () => URL.revokeObjectURL(url);
-  img.src = url;
-  $('pngPreview').innerHTML = '';
-  $('pngPreview').appendChild(img);
-}
-
-// True when the browser still holds enough to (re)build a job without asking
-// the user to pick their shape again.
-function hasLocalSource() {
-  if (mode === 'png') return !!$('file').files[0];
-  if (mode === 'stl') return !!$('fileStl').files[0];
-  if (mode === 'grid') return !!gridSpecFromInputs();
-  return !!$('prompt').value.trim();
-}
-
-// Create a server-side job from whatever source the user picked. The source
-// lives in the browser (a File, the grid inputs, the prompt box), so this can
-// be re-run at any time to rebuild a job the server has lost.
-async function createJob(opts) {
-  const waking = () => showAlert('alert1', 'info', 'Waking the server up — this can take up to a minute on the free plan…');
-  if (mode === 'png') {
-    const f = $('file').files[0];
-    if (!f) throw new Error('Choose an image first.');
-    const fd = new FormData();
-    fd.append('file', f);
-    fd.append('name', safeName());
-    fd.append('threshold', $('thr').value);
-    fd.append('simplify', $('simp').value);
-    fd.append('smooth_radius', $('smooth').value);
-    traceParams(fd);
-    const data = await postForm('/trace/from-png', fd, 180000, { onWaking: waking, ...opts });
-    return { data, message: `Shape traced.${modeChip(data.extraction_mode)}${data.warning ? `<div class="mini-warn">⚠ ${esc(data.warning)}</div>` : ''}` };
-  }
-  if (mode === 'stl') {
-    const f = $('fileStl').files[0];
-    if (!f) throw new Error('Choose an STL file first.');
-    pickedStlName = f.name;
-    const fd = new FormData();
-    fd.append('file', f);
-    fd.append('name', safeName());
-    fd.append('simplify', $('simp').value);
-    traceParams(fd);
-    const data = await postForm('/trace/from-stl', fd, 180000, { onWaking: waking, ...opts });
-    return { data, message: `Outline extracted from your model.${modeChip(data.extraction_mode)}${data.warning ? `<div class="mini-warn">⚠ ${esc(data.warning)}</div>` : ''}` };
-  }
+// The source behind the tab's own button (the upload tabs trace on pick).
+function sourceFromTab() {
   if (mode === 'grid') {
     const spec = gridSpecFromInputs();
     if (!spec) throw new Error('Enter valid grid dimensions first (5–300 mm cells, up to 40×40).');
-    const fd = new FormData();
-    fd.append('name', safeName());
-    fd.append('cols', spec.cols);
-    fd.append('rows', spec.rows);
-    fd.append('cell_w_mm', spec.cw);
-    fd.append('cell_h_mm', spec.ch);
-    const data = await postForm('/trace/from-grid', fd, 180000, { onWaking: waking, ...opts });
-    return {
-      data,
-      message: `Grid built — ${data.cols}×${data.rows} cells, ${fmtMm(data.grid_width_mm)} × ${fmtMm(data.grid_height_mm)} mm.${modeChip(data.extraction_mode)}`,
-    };
+    return { kind: 'grid', spec };
   }
   const prompt = $('prompt').value.trim();
   if (!prompt) throw new Error('Describe your shape first.');
-  const fd = new FormData();
-  fd.append('prompt', prompt);
-  fd.append('name', safeName());
-  const data = await postForm('/outline/from-prompt', fd, 180000, { onWaking: waking, ...opts });
-  return { data, message: `Outline drawn and traced.${modeChip(data.extraction_mode)}${data.warning ? `<div class="mini-warn">⚠ ${esc(data.warning)}</div>` : ''}` };
+  return { kind: 'prompt', prompt };
 }
 
-// Run an action that needs an existing job_id. If the server has forgotten the
-// job — which happens on every restart of a host with an ephemeral disk — the
-// job is silently rebuilt from the local source and the action retried once,
-// so a slider tweak never dead-ends on "job_id not found".
-async function withJobRecovery(alertRegion, run) {
-  if (!lastJobId) {
-    const { data } = await createJob();
-    lastJobId = data.job_id;
-    applyTopologyResponse(data);
-  }
-  try {
-    return await run(lastJobId);
-  } catch (e) {
-    if (!(e instanceof JobGoneError)) throw e;
-    showAlert(alertRegion, 'info', 'The server restarted and lost this job — rebuilding it from your original shape…');
-    const { data } = await createJob();
-    lastJobId = data.job_id;
-    applyTopologyResponse(data);
-    const result = await run(lastJobId);
-    clearAlert(alertRegion);
-    return result;
-  }
-}
-
-async function runStep1() {
+async function runStep1(source = null) {
   if (step1Busy) return;
+  if (!source) {
+    try {
+      source = sourceFromTab();
+    } catch (e) {
+      showAlert('alert1', 'err', esc(e.message));
+      return;
+    }
+  }
   step1Busy = true;
   document.querySelectorAll('.dropzone').forEach((d) => d.classList.add('busy'));
   setPill(1, 'Working…', 'busy');
   clearAlert('alert1');
-  buildDownloads(null);
   const slowTimer = setTimeout(() => {
     if (step1Busy) showAlert('alert1', 'info', 'Still working — photos and big models can take a minute or two.');
   }, 12000);
   try {
+    if (source.kind === 'png') showLocalImagePreview(source.file);
     setPreviewPlaceholder('svgPreview', 'Tracing…');
-    const { data, message } = await createJob();
-    showAlert('alert1', 'ok', message);
-    if (mode === 'grid') renderGridPreview();
-    lastJobId = data.job_id || lastJobId;
-    applyTopologyResponse(data);
-    updatePreviews(data);
+    const entry = await traceSource(source, 'alert1');
+    setCurrent(entry);
+    showAlert('alert1', 'ok', entry.message);
     clearTraceDirty();   // step 1 traced with the current settings already
     setPill(1, 'Done ✓', 'ok');
     if (!hasScrolledToStep2 && !reducedMotion.matches) {
@@ -1689,12 +1779,14 @@ async function runStep1() {
       $('step2').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   } catch (e) {
+    // Step 1 already shows the new pick, so the old shape is gone from view.
+    // Keeping it around would let Generate quietly build it anyway.
+    clearCurrent();
     setPill(1, 'Start here', 'accent');
     showAlert('alert1', 'err',
       `${esc(e.message || 'Something went wrong.')} <button type="button" class="retry" id="retryStep1">Try again</button>`);
     const retry = $('retryStep1');
-    if (retry) retry.addEventListener('click', () => runStep1());
-    setPreviewPlaceholder('svgPreview', 'The traced outline shows up here');
+    if (retry) retry.addEventListener('click', () => runStep1(source));
   } finally {
     clearTimeout(slowTimer);
     step1Busy = false;
@@ -1702,7 +1794,7 @@ async function runStep1() {
   }
 }
 
-$('btnStep1').addEventListener('click', () => withBusy($('btnStep1'), runStep1));
+$('btnStep1').addEventListener('click', () => withBusy($('btnStep1'), () => runStep1()));
 
 /* Dropzones: click, keyboard, drag & drop */
 function wireDropzone(dzId, inputId, fileLabelId, onPick) {
@@ -1724,9 +1816,12 @@ function wireDropzone(dzId, inputId, fileLabelId, onPick) {
   });
   input.addEventListener('change', () => {
     const f = input.files[0];
-    if (!f) return;
+    if (!f || step1Busy) return;
     setDzFile(fileLabelId, `✓ ${f.name} — drop another to replace`);
     onPick(f);
+    // The file now lives in `current`. Clearing the input means picking the
+    // same file again still fires "change" and re-runs the trace.
+    input.value = '';
   });
 }
 function setInputFile(input, file) {
@@ -1735,8 +1830,8 @@ function setInputFile(input, file) {
   input.files = dt.files;
   input.dispatchEvent(new Event('change', { bubbles: true }));
 }
-wireDropzone('dropPng', 'file', 'dzPngFile', (f) => { showLocalImagePreview(f); runStep1(); });
-wireDropzone('dropStl', 'fileStl', 'dzStlFile', () => { runStep1(); });
+wireDropzone('dropPng', 'file', 'dzPngFile', (f) => runStep1({ kind: 'png', file: f }));
+wireDropzone('dropStl', 'fileStl', 'dzStlFile', (f) => runStep1({ kind: 'stl', file: f }));
 
 /* Paste an image anywhere on the page */
 document.addEventListener('paste', (e) => {
@@ -1766,64 +1861,71 @@ $('btnExample').addEventListener('click', async () => {
 
 /* ── Step 2: re-trace ─────────────────────────────────────────────────── */
 $('btnTrace').addEventListener('click', () => withBusy($('btnTrace'), async () => {
+  if (!current) {
+    showAlert('alert2', 'err', 'Pick a shape in step 1 first.');
+    return;
+  }
+  clearAlert('alert2');
+  setPill(2, 'Working…', 'busy');
+  setPreviewPlaceholder('svgPreview', 'Tracing…');
   try {
-    if (!lastJobId && !hasLocalSource()) throw new Error('Pick a shape in step 1 first.');
+    const entry = await traceSource(current.source, 'alert2');
+    setCurrent(entry);
     clearAlert('alert2');
-    setPill(2, 'Working…', 'busy');
-    buildDownloads(null);
-    setPreviewPlaceholder('svgPreview', 'Tracing…');
-
-    const data = await withJobRecovery('alert2', (jobId) => {
-      const fd = new FormData();
-      fd.append('job_id', jobId);
-      fd.append('name', safeName());
-      fd.append('threshold', $('thr').value);
-      fd.append('simplify', $('simp').value);
-      fd.append('smooth_radius', $('smooth').value);
-      traceParams(fd);
-      return postForm('/trace/from-job', fd, 180000, {
-        onWaking: () => showAlert('alert2', 'info', 'Waking the server up — this can take up to a minute on the free plan…'),
-      });
-    });
-    applyTopologyResponse(data);
-    updatePreviews(data);
-    clearTraceDirty();
     setPill(2, 'Updated ✓', 'ok');
-    if (data.warning) showAlert('alert2', 'warn', esc(data.warning));
+    // A slider moved while this was running is not in the outline just traced.
+    if (traceSettingsKey() === entry.traceKey) clearTraceDirty();
+    else markTraceDirty();
+    if (entry.data.warning) showAlert('alert2', 'warn', esc(entry.data.warning));
   } catch (e) {
+    // The outline from before is still what Generate would use, so put it
+    // back on screen rather than leave a blank that hides it.
+    showOutlinePreview();
     setPill(2, 'Ready', 'accent');
-    showAlert('alert2', 'err', esc(e.message || 'Trace failed.'));
-    setPreviewPlaceholder('svgPreview', 'Trace failed — adjust and try again.');
+    showAlert('alert2', 'err', `${esc(e.message || 'Trace failed.')} The previous outline is still in use.`);
   }
 }));
 
 /* ── Step 3: generate ─────────────────────────────────────────────────── */
 $('btnRun').addEventListener('click', () => withBusy($('btnRun'), async () => {
   try {
-    if (!lastJobId && !hasLocalSource()) throw new Error('Pick a shape in step 1 first.');
+    if (!current) throw new Error('Pick a shape in step 1 first.');
     clearAlert('alert3');
     setPill(3, 'Working…', 'busy');
-    buildDownloads(null);
     $('stlStatus').textContent = 'Building your cutter…';
 
-    const data = await withJobRecovery('alert3', (jobId) => {
-      const fd = new FormData();
-      fd.append('job_id', jobId);
-      stlParams(fd);
-      return postForm('/stl/from-job', fd, 180000, {
-        onWaking: () => showAlert('alert3', 'info', 'Waking the server up — this can take up to a minute on the free plan…'),
-      });
-    });
-    applyTopologyResponse(data);
-    updatePreviews(data);
-    setSizeSummary(data);
-    buildDownloads(data);
+    // The grid inputs were changed after the grid was built: build the grid
+    // the inputs now describe, so the cutter matches the numbers on screen.
+    if (current.source.kind === 'grid') {
+      const spec = gridSpecFromInputs();
+      if (spec && !sameGridSpec(spec, current.source.spec)) {
+        setCurrent(await traceSource({ kind: 'grid', spec }, 'alert3'));
+        setPill(3, 'Working…', 'busy');
+      }
+    }
+
+    const built = current;
+    const stlKey = stlSettingsKey();
+    const name = safeName();
+    const fd = new FormData();
+    fd.append('trace', new Blob([JSON.stringify(built.trace)], { type: 'application/json' }), 'trace.json');
+    stlParams(fd);
+    const { blob, info } = await postForm('/stl/generate', fd, { as: 'blob', onWaking: wakingAlert('alert3') });
+    if (current !== built) return;   // a new shape arrived meanwhile — this cutter is for the old one
+    clearAlert('alert3');
+
+    cutter = { stl: blob, name, info, stlKey };
+    setSizeSummary(info);
+    await buildDownloads(cutter);
+    showInViewer(blob, false);
     setPill(3, 'Done ✓', 'ok');
+    // A setting changed while the cutter was being built is not in it.
+    if (stlSettingsKey() !== stlKey) markStlDirty();
     if (window.matchMedia('(max-width: 960px)').matches && !reducedMotion.matches) {
       $('resultPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   } catch (e) {
-    setPill(3, 'Ready', 'accent');
+    setPill(3, current ? 'Ready' : 'Waiting for a shape', current ? 'accent' : '');
     showAlert('alert3', 'err', esc(e.message || 'Generation failed.'));
     $('stlStatus').textContent = '';
   }

@@ -26,7 +26,7 @@ RUN python -c "from rembg.sessions.u2net import U2netSession; U2netSession.downl
 
 COPY . /app
 
-RUN mkdir -p /app/output && chown -R app:app /app
+RUN chown -R app:app /app
 
 USER app
 
