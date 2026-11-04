@@ -138,6 +138,27 @@ def _silhouette_polygon(proj: _Projection, simplify_epsilon: float) -> Polygon:
     return poly
 
 
+def _lattice_is_drawn(lattice, binary: np.ndarray, min_coverage: float = 0.8) -> bool:
+    """True when every detected grid line is actually present in ``binary``.
+
+    The detector only sees row and column totals, so a round outline (whose
+    extremes pile up into two peaks each way) reads as a 1x1 grid. Walking
+    along each line and checking the mask is drawn there tells them apart.
+    """
+    mask = ndimage.binary_dilation(binary, iterations=2)
+    h, w = mask.shape
+    x0, y0, x1, y1 = lattice.bounds
+    ys = np.clip(np.linspace(y0, y1, 200).round().astype(int), 0, h - 1)
+    xs = np.clip(np.linspace(x0, x1, 200).round().astype(int), 0, w - 1)
+    for x in lattice.x_lines:
+        if mask[ys, min(max(int(round(x)), 0), w - 1)].mean() < min_coverage:
+            return False
+    for y in lattice.y_lines:
+        if mask[min(max(int(round(y)), 0), h - 1), xs].mean() < min_coverage:
+            return False
+    return True
+
+
 def extract_outline_from_stl(
     stl_path: str,
     svg_out_path: str,
@@ -161,6 +182,8 @@ def extract_outline_from_stl(
     try:
         lattice = extract_lattice_from_mask(binary)
     except LatticeDetectionError:
+        lattice = None
+    if lattice is not None and topology == "auto" and not _lattice_is_drawn(lattice, binary):
         lattice = None
 
     detected = "lattice" if topology == "auto" and lattice is not None else ("single" if topology == "auto" else None)

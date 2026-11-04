@@ -1475,12 +1475,24 @@ function releaseDownloadUrls() {
   downloadUrls = [];
 }
 
-async function buildDownloads(c) {
+// `entry` is the shape the cutter was built from. Building the ZIP awaits,
+// and a new shape can be traced meanwhile; then this returns false and shows
+// nothing, rather than pairing the old cutter with the new shape's files.
+async function buildDownloads(c, entry = current) {
   const links = $('links');
   links.innerHTML = '';
   releaseDownloadUrls();
   setPanelStale(false);   // whatever lands here matches the settings it was built from
-  if (!c) { $('resultPanel').hidden = true; return; }
+  if (!c) { $('resultPanel').hidden = true; return false; }
+
+  const svgBlob = entry.svg ? new Blob([entry.svg], { type: 'image/svg+xml' }) : null;
+  const sourceFile = entry.source.file || null;
+  const zipEntries = [{ name: `${c.name}.stl`, blob: c.stl }];
+  if (svgBlob) zipEntries.push({ name: `${c.name}.svg`, blob: svgBlob });
+  if (sourceFile) zipEntries.push({ name: sourceFile.name, blob: sourceFile });
+  zipEntries.push({ name: 'trace.json', blob: new Blob([JSON.stringify(entry.trace)], { type: 'application/json' }) });
+  const zipBlob = await makeZip(zipEntries);
+  if (entry !== current) return false;
 
   const addLink = (el, blob, filename) => {
     const url = URL.createObjectURL(blob);
@@ -1489,22 +1501,15 @@ async function buildDownloads(c) {
     el.download = filename;   // blob: URLs carry no name of their own
     return el;
   };
-  const svgBlob = current.svg ? new Blob([current.svg], { type: 'image/svg+xml' }) : null;
-  const sourceFile = current.source.file || null;
-
   const stlA = document.createElement('a');
   stlA.className = 'btn btn-primary';
   stlA.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 5-5m-5 5-5-5"/><path d="M4 21h16"/></svg> Download STL';
   links.appendChild(addLink(stlA, c.stl, `${c.name}.stl`));
 
-  const zipEntries = [{ name: `${c.name}.stl`, blob: c.stl }];
-  if (svgBlob) zipEntries.push({ name: `${c.name}.svg`, blob: svgBlob });
-  if (sourceFile) zipEntries.push({ name: sourceFile.name, blob: sourceFile });
-  zipEntries.push({ name: 'trace.json', blob: new Blob([JSON.stringify(current.trace)], { type: 'application/json' }) });
   const zipA = document.createElement('a');
   zipA.className = 'btn btn-secondary';
   zipA.textContent = 'Everything (.zip)';
-  links.appendChild(addLink(zipA, await makeZip(zipEntries), `${c.name}.zip`));
+  links.appendChild(addLink(zipA, zipBlob, `${c.name}.zip`));
 
   const minor = document.createElement('div');
   minor.className = 'dl-minor';
@@ -1515,11 +1520,12 @@ async function buildDownloads(c) {
   }
   if (sourceFile) {
     const a = document.createElement('a');
-    a.textContent = current.source.kind === 'stl' ? 'Original model (STL)' : 'Original image';
+    a.textContent = entry.source.kind === 'stl' ? 'Original model (STL)' : 'Original image';
     minor.appendChild(addLink(a, sourceFile, sourceFile.name));
   }
   if (minor.children.length) links.appendChild(minor);
   $('resultPanel').hidden = false;
+  return true;
 }
 
 function setSizeSummary(data) {
@@ -1917,7 +1923,7 @@ $('btnRun').addEventListener('click', () => withBusy($('btnRun'), async () => {
 
     cutter = { stl: blob, name, info, stlKey };
     setSizeSummary(info);
-    await buildDownloads(cutter);
+    if (!(await buildDownloads(cutter, built))) return;   // replaced while the ZIP was built
     showInViewer(blob, false);
     setPill(3, 'Done ✓', 'ok');
     // A setting changed while the cutter was being built is not in it.

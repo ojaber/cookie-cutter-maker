@@ -210,3 +210,14 @@ def test_capped_model_with_a_big_hole_keeps_it(tmp_path):
     result = _trace(trimesh.creation.extrude_polygon(washer, 10.0), tmp_path)
     assert len(result.polygon.interiors) == 1
     assert result.polygon.area == pytest.approx(washer.area / 40 ** 2, rel=0.05)
+
+
+def test_walls_only_cylinder_is_not_a_grid(tmp_path):
+    """A round outline's extremes make two row and two column peaks, which
+    look like a 1x1 grid. The lines are not actually drawn, so it is a single
+    shape."""
+    from shapely.geometry import Point
+
+    result = _trace(_walls_only(Point(0, 0).buffer(20, 64)), tmp_path)
+    assert result.topology == "single"
+    assert result.polygon.area == pytest.approx(np.pi * 0.25, rel=0.03)
