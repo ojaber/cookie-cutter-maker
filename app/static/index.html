@@ -1489,7 +1489,15 @@ async function buildDownloads(c, entry = current) {
   const sourceFile = entry.source.file || null;
   const zipEntries = [{ name: `${c.name}.stl`, blob: c.stl }];
   if (svgBlob) zipEntries.push({ name: `${c.name}.svg`, blob: svgBlob });
-  if (sourceFile) zipEntries.push({ name: sourceFile.name, blob: sourceFile });
+  if (sourceFile) {
+    // An upload can share the cutter's name (cookie_cutter.stl in, cookie_cutter.stl
+    // out). Two entries with one name let unzip tools keep the wrong one.
+    let sourceName = sourceFile.name;
+    if (zipEntries.some((e) => e.name.toLowerCase() === sourceName.toLowerCase())) {
+      sourceName = sourceName.replace(/(\.[^.]*)?$/, '_input$1');
+    }
+    zipEntries.push({ name: sourceName, blob: sourceFile });
+  }
   zipEntries.push({ name: 'trace.json', blob: new Blob([JSON.stringify(entry.trace)], { type: 'application/json' }) });
   const zipBlob = await makeZip(zipEntries);
   if (entry !== current) return false;
