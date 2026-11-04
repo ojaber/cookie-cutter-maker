@@ -1671,7 +1671,7 @@ async function withBusy(btn, fn) {
 // fast and under hosts' request limits (4.5 MB on Vercel).
 const TRACE_PIXELS = 2_000_000;
 const MAX_SOURCE_PIXELS = 24_000_000;   // the server refuses more than this
-const fmtMb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
+const fmtMb = (bytes) => `${(bytes / 1048576).toFixed(2)} MB`;
 
 async function fitImageForUpload(file) {
   const limit = FEATURES.max_upload_bytes;
