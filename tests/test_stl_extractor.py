@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 import trimesh
 from shapely.geometry import Polygon
 
@@ -156,3 +157,67 @@ def test_extract_outline_from_stl_no_faces():
     finally:
         Path(tmp_path).unlink(missing_ok=True)
         Path(svg_path).unlink(missing_ok=True)
+
+
+# ── Models made of side walls only ────────────────────────────────────────────
+# Many cookie-cutter STLs are an outline extruded as walls, with no top or
+# bottom faces. Seen from above every face is edge-on, so a footprint built
+# from face areas is empty; the outline has to come from the silhouette.
+
+_L_SHAPE = Polygon([(0, 0), (40, 0), (40, 10), (10, 10), (10, 30), (0, 30)])
+
+
+def _walls_only(poly: Polygon, height: float = 10.0) -> trimesh.Trimesh:
+    """Extrude ``poly`` and keep only the side faces."""
+    solid = trimesh.creation.extrude_polygon(poly, height)
+    sides = np.abs(solid.face_normals[:, 2]) < 0.01
+    return solid.submesh([sides], append=True)
+
+
+def _trace(mesh: trimesh.Trimesh, tmp_path: Path):
+    stl = tmp_path / "m.stl"
+    mesh.export(stl)
+    return extract_outline_from_stl(str(stl), str(tmp_path / "m.svg"))
+
+
+def test_walls_only_model_traces_its_silhouette(tmp_path):
+    walls = _walls_only(_L_SHAPE)
+    assert not (np.abs(walls.face_normals[:, 2]) > 0.01).any()
+    result = _trace(walls, tmp_path)
+    capped = _trace(trimesh.creation.extrude_polygon(_L_SHAPE, 10.0), tmp_path)
+    # Same outline, same place, same way round — not mirrored, not a sliver.
+    overlap = result.polygon.intersection(capped.polygon).area / capped.polygon.union(result.polygon).area
+    assert overlap > 0.97, overlap
+
+
+def test_bundled_example_models_trace(tmp_path):
+    examples = Path(__file__).resolve().parent.parent / "examples"
+    for name in ("dino", "911", "racecar", "drill"):
+        mesh = trimesh.load(examples / f"{name}.stl", force="mesh")
+        result = extract_outline_from_stl(str(examples / f"{name}.stl"), str(tmp_path / f"{name}.svg"))
+        minx, miny, maxx, maxy = result.polygon.bounds
+        expected = mesh.extents[1] / mesh.extents[0]
+        assert (maxy - miny) / (maxx - minx) == pytest.approx(expected, rel=0.03), name
+        # A real silhouette, not the biggest of a few slivers.
+        assert result.polygon.area > 0.2, name
+
+
+def test_capped_model_with_a_big_hole_keeps_it(tmp_path):
+    """A washer covers well under half of its filled outline. Its exact face
+    footprint is still right and must win over the hole-filled silhouette."""
+    washer = Polygon([(0, 0), (40, 0), (40, 40), (0, 40)], [[(4, 4), (36, 4), (36, 36), (4, 36)]])
+    assert washer.area < 0.5 * Polygon(washer.exterior).area
+    result = _trace(trimesh.creation.extrude_polygon(washer, 10.0), tmp_path)
+    assert len(result.polygon.interiors) == 1
+    assert result.polygon.area == pytest.approx(washer.area / 40 ** 2, rel=0.05)
+
+
+def test_walls_only_cylinder_is_not_a_grid(tmp_path):
+    """A round outline's extremes make two row and two column peaks, which
+    look like a 1x1 grid. The lines are not actually drawn, so it is a single
+    shape."""
+    from shapely.geometry import Point
+
+    result = _trace(_walls_only(Point(0, 0).buffer(20, 64)), tmp_path)
+    assert result.topology == "single"
+    assert result.polygon.area == pytest.approx(np.pi * 0.25, rel=0.03)

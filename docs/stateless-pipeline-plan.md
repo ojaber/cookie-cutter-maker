@@ -1,5 +1,13 @@
 # Plan: make the pipeline stateless
 
+> **Status: done.** The server keeps nothing between requests. `/trace/*`
+> return the outline as `trace` plus an inline SVG; `/stl/generate` takes that
+> trace back and returns the STL as the body (size summary in `X-Cutter-Info`);
+> `/trace/from-job`, `/stl/from-job`, `/files/`, the job sweeper and
+> `JOB_TTL_HOURS` are gone. The browser holds the source, the trace and the
+> generated files, and builds the ZIP itself. The plan is kept below for the
+> reasoning.
+
 ## Why
 
 A single logical operation — pick a shape, check the outline, generate the

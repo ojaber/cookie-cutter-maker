@@ -45,6 +45,12 @@ def test_csp_allows_viewer_cdn_fallback(client):
     assert "img-src 'self' data: blob:" in csp
 
 
+def test_csp_lets_the_viewer_read_held_files(client):
+    # The 3D viewer fetches the STL the browser holds through a blob: URL.
+    csp = client.get("/").headers["Content-Security-Policy"]
+    assert "connect-src 'self' blob:" in csp
+
+
 def test_default_frame_policy_is_self_only(client):
     r = client.get("/")
     assert r.headers["X-Frame-Options"] == "SAMEORIGIN"
@@ -63,10 +69,10 @@ def test_frame_ancestors_env_override(tmp_path, monkeypatch):
 
 # ── robots.txt ────────────────────────────────────────────────────────────────
 
-def test_robots_txt_disallows_job_files(client):
+def test_robots_txt_disallows_the_api(client):
     r = client.get("/robots.txt")
     assert r.status_code == 200
-    assert "Disallow: /files/" in r.text
+    assert "Disallow: /stl/" in r.text
 
 
 def test_robots_txt_exempt_from_auth(tmp_path, monkeypatch):
@@ -161,21 +167,11 @@ def test_concurrency_guard_disabled_when_zero(tmp_path, monkeypatch):
         assert r.status_code == 200
 
 
-# ── Job artifacts must not be cached ──────────────────────────────────────────
+# ── Re-tracing ────────────────────────────────────────────────────────────────
 
-def test_job_files_are_revalidated(client):
-    """{name}.svg and {name}.stl are rewritten in place by a re-trace or a
-    regenerate. Without a no-cache header the browser keeps showing the
-    previous result, which looks exactly like the settings having no effect."""
-    r = client.post("/trace/from-grid", data={"name": "g", "cols": "2", "rows": "2", "cell_w_mm": "30"})
-    svg_url = r.json()["svg"]
-    resp = client.get(svg_url)
-    assert resp.status_code == 200
-    assert "no-cache" in resp.headers.get("Cache-Control", "").lower()
-
-
-def test_retrace_serves_the_new_content(client):
-    """End to end: a different simplify tolerance must reach the served SVG."""
+def test_retrace_returns_the_new_outline(client):
+    """Re-tracing is the same upload with new settings: a different simplify
+    tolerance must reach the SVG that comes back."""
     import io
 
     from PIL import Image, ImageDraw
@@ -185,16 +181,24 @@ def test_retrace_serves_the_new_content(client):
     buf = io.BytesIO()
     img.save(buf, format="PNG")
 
-    r = client.post(
-        "/trace/from-png",
-        data={"name": "c", "simplify": "0.02"},
-        files={"file": ("a.png", buf.getvalue(), "image/png")},
-    )
-    job_id = r.json()["job_id"]
-    coarse = client.get(r.json()["svg"]).text
+    def trace(simplify):
+        r = client.post(
+            "/trace/from-png",
+            data={"name": "c", "simplify": simplify},
+            files={"file": ("a.png", buf.getvalue(), "image/png")},
+        )
+        assert r.status_code == 200, r.text
+        return r.json()["svg"]
 
-    r2 = client.post("/trace/from-job", data={"job_id": job_id, "name": "c", "simplify": "0.0002"})
-    fine = client.get(r2.json()["svg"]).text
-
+    coarse, fine = trace("0.02"), trace("0.0002")
     # A circle traced finely has many more segments than one traced coarsely.
     assert fine.count(" L ") > coarse.count(" L ") * 2, (coarse.count(" L "), fine.count(" L "))
+
+
+def test_generated_cutter_is_not_cached(client):
+    import json
+
+    trace = client.post("/trace/from-grid", data={"name": "g", "cols": "2", "rows": "2", "cell_w_mm": "30"}).json()["trace"]
+    r = client.post("/stl/generate", files={"trace": ("t.json", json.dumps(trace), "application/json")})
+    assert r.status_code == 200
+    assert "no-store" in r.headers.get("Cache-Control", "").lower()

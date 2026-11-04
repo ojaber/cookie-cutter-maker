@@ -1,13 +1,14 @@
 """End-to-end tests for the FastAPI app in app/main.py.
 
 These tests exercise the HTTP surface in process via fastapi.testclient.TestClient,
-including the security validation layer (path-traversal guards, upload-size limit,
-decompression-bomb guard) and the offline pipeline path.
+including the security validation layer (upload-size limit, decompression-bomb
+guard, untrusted trace payloads) and the offline pipeline path.
 """
 from __future__ import annotations
 
 import importlib
 import io
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -40,10 +41,13 @@ def _reset_prometheus_default_registry() -> None:
 def _load_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **env):
     """Import a fresh copy of app.main with env vars applied first.
 
-    Auth/SESSION/OUTPUT_DIR are all captured at import time, so each test that
-    wants a different config must re-import the module.
+    Auth/SESSION and the guards are captured at import time, so each test that
+    wants a different config must re-import the module. Scratch directories go
+    under ``tmp_path/scratch`` so tests can check nothing is left behind.
     """
-    monkeypatch.setenv("PIPELINE_OUTPUT_DIR", str(tmp_path / "output"))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(exist_ok=True)
+    monkeypatch.setattr("tempfile.tempdir", str(scratch))
     monkeypatch.setenv("REMBG_ENABLED", "false")
     for k, v in env.items():
         if v is None:
@@ -63,7 +67,34 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     mod = _load_app(tmp_path, monkeypatch)
     with TestClient(mod.app) as c:
         c.app_module = mod  # type: ignore[attr-defined]
+        c.scratch = tmp_path / "scratch"  # type: ignore[attr-defined]
         yield c
+
+
+def _trace_png(client, png: bytes, **data):
+    r = client.post("/trace/from-png", data=data, files={"file": ("a.png", png, "image/png")})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _generate(client, trace: dict, **data):
+    """POST a trace back to /stl/generate, as the browser does."""
+    return client.post(
+        "/stl/generate",
+        data=data,
+        files={"trace": ("trace.json", json.dumps(trace), "application/json")},
+    )
+
+
+def _info(resp) -> dict:
+    return json.loads(resp.headers["X-Cutter-Info"])
+
+
+def _extent_x(stl_bytes: bytes) -> float:
+    import trimesh
+
+    mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
+    return float(mesh.vertices[:, 0].max() - mesh.vertices[:, 0].min())
 
 
 # ── Basic endpoints ───────────────────────────────────────────────────────────
@@ -90,28 +121,14 @@ def test_metrics_endpoint_exposes_prometheus_format(client):
     assert "http_requests_total" in r.text
 
 
-def test_metrics_path_collapses_files_route(client):
-    # The collapsed label keeps Prometheus cardinality bounded.
-    assert client.app_module._metrics_path("/files/abc/def.png") == "/files/:job_id/:filename"
-    assert client.app_module._metrics_path("/healthz") == "/healthz"
 
 
 # ── Path-traversal / input validation ─────────────────────────────────────────
 
-def test_file_download_rejects_path_traversal(client):
-    r = client.get("/files/..%2F..%2Fetc/passwd")
-    assert r.status_code in (400, 404)
 
 
-def test_file_download_rejects_bad_job_id(client):
-    r = client.get("/files/not-a-uuid/file.png")
-    assert r.status_code == 400
 
 
-def test_file_download_rejects_traversal_in_filename(client):
-    # a valid-looking hex job id paired with a traversal filename
-    r = client.get("/files/" + "a" * 32 + "/..%2Fsecret")
-    assert r.status_code in (400, 404)
 
 
 def test_trace_rejects_unsafe_name(client):
@@ -172,51 +189,28 @@ def test_trace_rejects_decompression_bomb(client, monkeypatch):
         files={"file": ("a.png", png, "image/png")},
     )
     assert r.status_code == 400
+    assert "too many pixels" in r.json()["detail"]
 
 
-def test_trace_from_job_rejects_bad_job_id(client):
-    r = client.post("/trace/from-job", data={"job_id": "../../etc"})
-    assert r.status_code == 400
 
 
-def test_stl_from_job_rejects_bad_job_id(client):
-    r = client.post("/stl/from-job", data={"job_id": "not-hex"})
-    assert r.status_code == 400
 
 
-def test_trace_from_job_rejects_unknown_job_id(client):
-    r = client.post("/trace/from-job", data={"job_id": "a" * 32})
-    assert r.status_code == 404
 
 
 # ── Happy path: end-to-end offline pipeline ───────────────────────────────────
 
-def test_trace_from_png_writes_files_inside_job_dir(client, tmp_path):
-    png = _make_outline_png()
-    r = client.post(
-        "/trace/from-png",
-        data={"name": "outline"},
-        files={"file": ("a.png", png, "image/png")},
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    job_id = body["job_id"]
-    assert len(job_id) == 32
-
-    # downloads of advertised artifacts work
-    for url in (body["png"], body["svg"]):
-        d = client.get(url)
-        assert d.status_code == 200
-
-    # files live under the configured output dir
-    out_root = Path(client.app_module.OUTPUT_DIR)
-    assert (out_root / job_id / "outline.png").is_file()
-    assert (out_root / job_id / "outline.svg").is_file()
-    assert (out_root / job_id / "polygon.json").is_file()
-    assert (out_root / job_id / "trace_meta.json").is_file()
+def test_trace_from_png_returns_the_trace_and_keeps_nothing(client):
+    body = _trace_png(client, _make_outline_png(), name="outline")
+    assert "job_id" not in body
+    assert body["trace"]["topology"] == "single"
+    assert body["trace"]["polygon"]["type"] in ("Polygon", "MultiPolygon")
+    assert body["svg"].lstrip().startswith("<")
+    # The scratch directory is gone before the response is sent.
+    assert list(client.scratch.iterdir()) == []
 
 
-def test_pipeline_from_png_produces_stl_and_zip(client):
+def test_pipeline_from_png_returns_the_stl(client):
     png = _make_outline_png()
     r = client.post(
         "/pipeline/from-png",
@@ -224,16 +218,20 @@ def test_pipeline_from_png_produces_stl_and_zip(client):
         files={"file": ("a.png", png, "image/png")},
     )
     assert r.status_code == 200, r.text
-    body = r.json()
-    stl = client.get(body["stl"])
-    assert stl.status_code == 200
-    assert stl.content[:5] == b"solid" or len(stl.content) > 80  # ascii or binary STL
+    assert r.headers["content-type"] == "model/stl"
+    assert 'filename="cookie.stl"' in r.headers["content-disposition"]
+    assert len(r.content) > 80
+    assert _info(r)["topology"] == "single"
 
-    zip_resp = client.get(body["zip"])
-    assert zip_resp.status_code == 200
-    with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as zf:
-        names = set(zf.namelist())
-        assert {"cookie.png", "cookie.svg", "cookie.stl"} <= names
+    z = client.post(
+        "/pipeline/from-png",
+        data={"name": "cookie", "width_mm": "60", "format": "zip"},
+        files={"file": ("a.png", png, "image/png")},
+    )
+    assert z.status_code == 200, z.text
+    with zipfile.ZipFile(io.BytesIO(z.content)) as zf:
+        assert {"cookie.png", "cookie.svg", "cookie.stl", "trace.json"} <= set(zf.namelist())
+    assert list(client.scratch.iterdir()) == []
 
 
 def test_grid_png_pipeline_lattice_topology(client):
@@ -246,33 +244,21 @@ def test_grid_png_pipeline_lattice_topology(client):
         files={"file": ("grid.png", grid_png.read_bytes(), "image/png")},
     )
     assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["topology"] == "lattice"
-    assert body["cols"] == 3
-    assert body["rows"] == 4
-    assert body.get("height_mm", 0) > 95
-    stl = client.get(body["stl"])
-    assert stl.status_code == 200
-    assert len(stl.content) > 100
+    info = _info(r)
+    assert info["topology"] == "lattice"
+    assert info["cols"] == 3
+    assert info["rows"] == 4
+    assert info.get("height_mm", 0) > 95
+    assert len(r.content) > 100
 
 
-def test_pipeline_then_stl_from_job(client):
-    png = _make_outline_png()
-    r1 = client.post(
-        "/trace/from-png",
-        data={"name": "outline"},
-        files={"file": ("a.png", png, "image/png")},
-    )
-    job_id = r1.json()["job_id"]
-
-    r2 = client.post(
-        "/stl/from-job",
-        data={"job_id": job_id, "name": "outline", "width_mm": "60"},
-    )
-    assert r2.status_code == 200, r2.text
-    body = r2.json()
-    stl = client.get(body["stl"])
-    assert stl.status_code == 200
+def test_trace_then_generate_from_the_returned_trace(client):
+    body = _trace_png(client, _make_outline_png(), name="outline")
+    r = _generate(client, body["trace"], name="outline", width_mm="60")
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "model/stl"
+    assert _extent_x(r.content) > 60  # the rim sticks out past the outline
+    assert list(client.scratch.iterdir()) == []
 
 
 # ── Grid Builder ──────────────────────────────────────────────────────────────
@@ -290,9 +276,7 @@ def test_trace_from_grid_builds_lattice_job(client):
     assert body["extraction_mode"] == "grid"
     assert body["grid_width_mm"] == pytest.approx(90.0)
     assert body["grid_height_mm"] == pytest.approx(100.0)
-    svg = client.get(body["svg"])
-    assert svg.status_code == 200
-    assert svg.text.count("<line") == 4 + 5
+    assert body["svg"].count("<line") == 4 + 5
 
 
 def test_trace_from_grid_square_cells_by_default(client):
@@ -320,63 +304,36 @@ def test_trace_from_grid_rejects_invalid_spec(client):
 
 
 def test_grid_job_stl_honors_exact_cell_size(client):
-    """stl/from-job must ignore width_mm for Grid Builder jobs so the
-    requested cell sizes are exact."""
-    import trimesh
-
+    """Generating a Grid Builder trace must ignore width_mm so the requested
+    cell sizes are exact."""
     r = client.post(
         "/trace/from-grid",
         data={"name": "grid", "cols": "3", "rows": "2", "cell_w_mm": "30"},
     )
-    job_id = r.json()["job_id"]
-
-    r2 = client.post(
-        "/stl/from-job",
+    r2 = _generate(
+        client, r.json()["trace"],
         # width_mm deliberately wrong — must not rescale the grid.
-        data={"job_id": job_id, "name": "grid", "width_mm": "200", "flange_out_mm": "2.5"},
+        name="grid", width_mm="200", flange_out_mm="2.5",
     )
     assert r2.status_code == 200, r2.text
-    body = r2.json()
-    assert body["grid_width_mm"] == pytest.approx(90.0)
-    assert body["height_mm"] == pytest.approx(60.0)
-
-    out_root = Path(client.app_module.OUTPUT_DIR)
-    mesh = trimesh.load(out_root / job_id / "grid.stl", force="mesh")
-    extent_x = mesh.vertices[:, 0].max() - mesh.vertices[:, 0].min()
-    assert extent_x == pytest.approx(90.0 + 2 * 2.5, abs=0.2)
+    info = _info(r2)
+    assert info["grid_width_mm"] == pytest.approx(90.0)
+    assert info["height_mm"] == pytest.approx(60.0)
+    assert _extent_x(r2.content) == pytest.approx(90.0 + 2 * 2.5, abs=0.2)
 
 
 def test_pipeline_from_grid_one_shot(client):
     r = client.post(
         "/pipeline/from-grid",
-        data={"name": "grid", "cols": "2", "rows": "3", "cell_w_mm": "25"},
+        data={"name": "grid", "cols": "2", "rows": "3", "cell_w_mm": "25", "format": "zip"},
     )
     assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["topology"] == "lattice"
-    assert body["grid_width_mm"] == pytest.approx(50.0)
-    stl = client.get(body["stl"])
-    assert stl.status_code == 200
-    assert len(stl.content) > 100
-    zip_resp = client.get(body["zip"])
-    assert zip_resp.status_code == 200
-    with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as zf:
-        assert {"grid.svg", "grid.stl", "trace_meta.json"} <= set(zf.namelist())
-
-
-def test_grid_job_trace_from_job_returns_stored_trace(client):
-    """Grid jobs have no PNG/STL source; re-trace must not 404 or garbage."""
-    r = client.post(
-        "/trace/from-grid",
-        data={"name": "grid", "cols": "3", "rows": "4", "cell_w_mm": "30"},
-    )
-    job_id = r.json()["job_id"]
-    r2 = client.post("/trace/from-job", data={"job_id": job_id, "name": "grid"})
-    assert r2.status_code == 200, r2.text
-    body = r2.json()
-    assert body["topology"] == "lattice"
-    assert body["cols"] == 3
-    assert body["extraction_mode"] == "grid"
+    info = _info(r)
+    assert info["topology"] == "lattice"
+    assert info["grid_width_mm"] == pytest.approx(50.0)
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        assert {"grid.svg", "grid.stl", "trace.json"} <= set(zf.namelist())
+        assert len(zf.read("grid.stl")) > 100
 
 
 # ── Source preservation regressions ───────────────────────────────────────────
@@ -387,50 +344,19 @@ def _make_box_stl() -> bytes:
     return trimesh.creation.box(extents=(30, 20, 10)).export(file_type="stl")
 
 
-def test_stl_source_survives_generation(client):
-    """Generating a cutter must not overwrite the uploaded source STL, and a
-    re-trace afterwards must still trace the original upload."""
-    stl_bytes = _make_box_stl()
+def test_stl_trace_reports_the_source_size(client):
     r = client.post(
         "/trace/from-stl",
         data={"name": "cookie_cutter"},
-        files={"file": ("box.stl", stl_bytes, "model/stl")},
+        files={"file": ("box.stl", _make_box_stl(), "model/stl")},
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    job_id = body["job_id"]
     assert body["source_width_mm"] == pytest.approx(30.0, abs=0.1)
-    assert "_input.stl" in body["source_stl"]
-
-    source_path = Path(client.app_module.OUTPUT_DIR) / job_id / "cookie_cutter_input.stl"
-    size_before = source_path.stat().st_size
-
-    r2 = client.post("/stl/from-job", data={"job_id": job_id, "width_mm": "60"})
-    assert r2.status_code == 200, r2.text
-    assert source_path.stat().st_size == size_before
-
-    r3 = client.post("/trace/from-job", data={"job_id": job_id})
-    assert r3.status_code == 200, r3.text
-    assert r3.json()["source_width_mm"] == pytest.approx(30.0, abs=0.1)
+    gen = _generate(client, body["trace"], width_mm="60")
+    assert gen.status_code == 200, gen.text
 
 
-def test_png_retrace_after_generation_still_traces_png(client):
-    """A PNG job gains a generated {name}.stl; re-trace must keep using the
-    PNG source, not the generated mesh."""
-    png = _make_outline_png()
-    r = client.post(
-        "/trace/from-png",
-        data={"name": "cookie_cutter"},
-        files={"file": ("a.png", png, "image/png")},
-    )
-    job_id = r.json()["job_id"]
-
-    r2 = client.post("/stl/from-job", data={"job_id": job_id, "width_mm": "60"})
-    assert r2.status_code == 200, r2.text
-
-    r3 = client.post("/trace/from-job", data={"job_id": job_id})
-    assert r3.status_code == 200, r3.text
-    assert r3.json()["extraction_mode"] == "binary"
 
 
 # ── Prompt endpoints when OPENAI_API_KEY is unset ─────────────────────────────
@@ -530,37 +456,23 @@ def test_generated_stl_reports_its_real_footprint(client):
     """The grip rim extends past the outline, so the part prints wider than the
     grid's cell area. The response must report the measured size, not just the
     requested one."""
-    import trimesh
-
     r = client.post(
         "/trace/from-grid",
         data={"name": "grid", "cols": "3", "rows": "4", "cell_w_mm": "30", "cell_h_mm": "30"},
     )
-    job_id = r.json()["job_id"]
     assert r.json()["grid_width_mm"] == pytest.approx(90.0)
 
-    r2 = client.post(
-        "/stl/from-job",
-        data={"job_id": job_id, "name": "grid", "flange_out_mm": "2.5", "wall_mm": "1.4"},
-    )
-    body = r2.json()
-    assert body["footprint_w_mm"] == pytest.approx(95.0, abs=0.2)   # 90 + 2 * 2.5 rim
-    assert body["footprint_h_mm"] == pytest.approx(125.0, abs=0.2)
-
-    mesh = trimesh.load(Path(client.app_module.OUTPUT_DIR) / job_id / "grid.stl", force="mesh")
-    extent_x = mesh.vertices[:, 0].max() - mesh.vertices[:, 0].min()
-    assert body["footprint_w_mm"] == pytest.approx(float(extent_x), abs=0.01)
+    r2 = _generate(client, r.json()["trace"], name="grid", flange_out_mm="2.5", wall_mm="1.4")
+    info = _info(r2)
+    assert info["footprint_w_mm"] == pytest.approx(95.0, abs=0.2)   # 90 + 2 * 2.5 rim
+    assert info["footprint_h_mm"] == pytest.approx(125.0, abs=0.2)
+    assert info["footprint_w_mm"] == pytest.approx(_extent_x(r2.content), abs=0.01)
 
 
 def test_footprint_tracks_the_rim_setting(client):
-    r = client.post("/trace/from-grid", data={"name": "g", "cols": "2", "rows": "2", "cell_w_mm": "30"})
-    job_id = r.json()["job_id"]
-    no_rim = client.post(
-        "/stl/from-job", data={"job_id": job_id, "name": "g", "flange_out_mm": "0", "wall_mm": "1.4"}
-    ).json()
-    big_rim = client.post(
-        "/stl/from-job", data={"job_id": job_id, "name": "g", "flange_out_mm": "5", "wall_mm": "1.4"}
-    ).json()
+    trace = client.post("/trace/from-grid", data={"name": "g", "cols": "2", "rows": "2", "cell_w_mm": "30"}).json()["trace"]
+    no_rim = _info(_generate(client, trace, name="g", flange_out_mm="0", wall_mm="1.4"))
+    big_rim = _info(_generate(client, trace, name="g", flange_out_mm="5", wall_mm="1.4"))
     # 60 mm of cells, plus half a wall each side with no rim, plus 5 mm each side with one.
     assert no_rim["footprint_w_mm"] == pytest.approx(61.4, abs=0.2)
     assert big_rim["footprint_w_mm"] == pytest.approx(70.0, abs=0.2)
@@ -569,6 +481,89 @@ def test_footprint_tracks_the_rim_setting(client):
 def test_single_shape_also_reports_a_footprint(client):
     png = _make_outline_png()
     r = client.post("/pipeline/from-png", data={"name": "c", "width_mm": "60"}, files={"file": ("a.png", png, "image/png")})
-    body = r.json()
     # Wider than the requested 60 mm because of the rim.
-    assert body["footprint_w_mm"] > 60.0
+    assert _info(r)["footprint_w_mm"] > 60.0
+
+
+# ── Traces posted back by the client are untrusted ────────────────────────────
+
+def _square_trace() -> dict:
+    return {
+        "topology": "single",
+        "polygon": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]},
+    }
+
+
+def test_generate_accepts_a_minimal_hand_written_trace(client):
+    r = _generate(client, _square_trace(), width_mm="50")
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("trace, fragment", [
+    ([], "JSON object"),
+    ({"topology": "blob"}, "topology"),
+    ({"topology": "single"}, "polygon"),
+    ({"topology": "single", "polygon": {"type": "Point", "coordinates": [0, 0]}}, "polygon"),
+    ({"topology": "single", "polygon": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [0, 0]]]}}, "4 points"),
+    ({"topology": "single", "polygon": {"type": "Polygon", "coordinates": [[[0, 0], ["x", 0], [1, 1], [0, 0]]]}}, "number"),
+    ({"topology": "single", "polygon": {"type": "Polygon", "coordinates": [[[0, 0], [1e12, 0], [1, 1], [0, 0]]]}}, "out of range"),
+    # A bow-tie: self-intersecting, so not a shape a cutter can be built from.
+    ({"topology": "single", "polygon": {"type": "Polygon", "coordinates": [[[0, 0], [1, 1], [1, 0], [0, 1], [0, 0]]]}}, "valid shape"),
+    ({"topology": "lattice", "lattice": {"x_lines": [0, 1], "y_lines": [1, 0]}}, "increasing"),
+    ({"topology": "lattice", "lattice": {"x_lines": list(range(500)), "y_lines": [0, 1]}}, "x_lines"),
+    ({"topology": "lattice", "grid_spec": {"cols": 500, "rows": 2, "cell_w_mm": 30, "cell_h_mm": 30}}, "Grid must be"),
+])
+def test_generate_rejects_malformed_traces(client, trace, fragment):
+    r = _generate(client, trace)
+    assert r.status_code == 400, r.text
+    assert fragment in r.json()["detail"]
+
+
+def test_generate_rejects_non_json_and_nan(client):
+    r = client.post("/stl/generate", files={"trace": ("t.json", b"not json", "application/json")})
+    assert r.status_code == 400
+    nan = b'{"topology":"single","polygon":{"type":"Polygon","coordinates":[[[0,0],[1,0],[NaN,1],[0,0]]]}}'
+    r = client.post("/stl/generate", files={"trace": ("t.json", nan, "application/json")})
+    assert r.status_code == 400
+
+
+def test_generate_rejects_too_many_points(client):
+    ring = [[float(i % 2), float(i)] for i in range(60_000)]
+    trace = {"topology": "single", "polygon": {"type": "Polygon", "coordinates": [ring + [ring[0]]]}}
+    r = _generate(client, trace)
+    assert r.status_code in (400, 413)
+
+
+def test_generate_rejects_an_oversized_trace(client, monkeypatch):
+    monkeypatch.setattr(client.app_module, "MAX_TRACE_BYTES", 100)
+    r = _generate(client, _square_trace() | {"extraction_warning": "x" * 200})
+    assert r.status_code == 413
+
+
+def test_grid_trace_is_rebuilt_from_its_spec(client):
+    """A grid trace's line positions are not trusted: the lattice comes from
+    the four numbers in grid_spec, so tampered lines change nothing."""
+    trace = client.post("/trace/from-grid", data={"cols": "2", "rows": "2", "cell_w_mm": "30"}).json()["trace"]
+    trace["lattice"]["x_lines"] = [0, 1000]
+    r = _generate(client, trace, flange_out_mm="0", wall_mm="1.4")
+    assert r.status_code == 200, r.text
+    assert _extent_x(r.content) == pytest.approx(61.4, abs=0.2)
+
+
+def test_lattice_bounds_come_from_the_lines(client):
+    """The mesher scales by the bounds but draws walls from the lines, so a
+    posted trace whose bounds disagree with its lines must not be able to blow
+    the cutter up to many times the requested width."""
+    trace = {
+        "topology": "lattice",
+        "lattice": {"x_lines": [0, 500, 1000], "y_lines": [0, 500, 1000], "bounds": [0, 0, 1, 1]},
+    }
+    r = _generate(client, trace, width_mm="80", flange_out_mm="0", wall_mm="1.4")
+    assert r.status_code == 200, r.text
+    assert _extent_x(r.content) == pytest.approx(81.4, abs=0.5)
+
+
+def test_job_routes_are_gone(client):
+    assert client.post("/trace/from-job", data={"job_id": "a" * 32}).status_code in (404, 405)
+    assert client.post("/stl/from-job", data={"job_id": "a" * 32}).status_code in (404, 405)
+    assert client.get("/files/" + "a" * 32 + "/x.stl").status_code == 404

@@ -6,7 +6,6 @@ services:
     ports:
       - "8000:8000"
     environment:
-      PIPELINE_OUTPUT_DIR: /app/output
       # Optional: require a passphrase to access the app
       ACCESS_PASSWORD: ${ACCESS_PASSWORD:-}
       # Required for stable sessions when ACCESS_PASSWORD is set
@@ -17,5 +16,4 @@ services:
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-20}
       HEAVY_CONCURRENCY: ${HEAVY_CONCURRENCY:-2}
     volumes:
-      - ./output:/app/output
       - ./examples:/app/examples

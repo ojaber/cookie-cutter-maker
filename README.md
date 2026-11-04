@@ -31,14 +31,11 @@ There is a `Dockerfile` and a compose file if you would rather not install
 anything:
 
 ```bash
-make docker-up        # or: mkdir -p output && docker compose up --build
+make docker-up        # or: docker compose up --build
 ```
 
-The `mkdir` matters on Linux. The container runs as a non-root user, so the
-bind-mounted `output/` directory has to already exist and be writable by you
-rather than by root.
-
-Generated files land in `output/<job_id>/`.
+The server stores nothing: uploads and generated files only exist for the
+length of the request that uses them, and your browser holds the results.
 
 ## The web app
 
@@ -114,14 +111,29 @@ python -m cutter_pipeline.cli --grid 4x3 --cell-mm 30 --cell-h-mm 25 --outdir ou
 python -m cutter_pipeline.cli --prompt "a heart shape silhouette" --outdir output --name heart
 ```
 
-The HTTP API mirrors this. Each source has a two-step form (`/trace/from-png`,
-`/trace/from-stl`, `/trace/from-grid`, then `/stl/from-job`) so you can retrace
-and re-mesh without re-uploading, and a one-shot form that returns the STL and
-a zip in a single call:
+The HTTP API mirrors this, and keeps nothing between calls. The one-shot form
+takes a source and returns the STL as the response body (`-F format=zip` adds
+the outline SVG, the source and the trace):
 
 ```bash
 curl -X POST http://localhost:8000/pipeline/from-grid \
-  -F cols=4 -F rows=3 -F cell_w_mm=30 -F cell_h_mm=25 -F name=brownie_grid
+  -F cols=4 -F rows=3 -F cell_w_mm=30 -F cell_h_mm=25 -F name=brownie_grid \
+  -o brownie_grid.stl
+```
+
+The two-step form is what the web app uses. `/trace/from-png`,
+`/trace/from-stl` and `/trace/from-grid` return the traced outline as `trace`
+(a few KB of JSON) along with an SVG preview. Post that `trace` back to
+`/stl/generate` as a file field with whatever size settings you want, as many
+times as you like, without re-uploading the source. To re-trace with different
+outline settings, send the source again. Every STL response carries its
+measured size and topology as JSON in the `X-Cutter-Info` header.
+
+```bash
+curl -s -X POST http://localhost:8000/trace/from-grid \
+  -F cols=4 -F rows=3 -F cell_w_mm=30 | jq .trace > trace.json
+curl -X POST http://localhost:8000/stl/generate \
+  -F trace=@trace.json -F flange_out_mm=4 -o grid.stl
 ```
 
 Full schemas are at `/docs`.
@@ -136,10 +148,15 @@ The defaults assume the instance is reachable from the open internet:
   in-memory and per-process, which is correct for the default single-instance
   deploy. Run one uvicorn worker, or put a real rate limiter in front, if you
   scale out.
-- **Uploads are bounded** by `MAX_UPLOAD_BYTES` and a decompression-bomb guard,
-  and jobs are swept after `JOB_TTL_HOURS` so the disk cannot fill.
+- **Nothing is stored.** Each request works in a scratch directory that is
+  deleted before the response goes out, so visitors' images are never kept and
+  the disk cannot fill. A trace posted back to `/stl/generate` is treated as
+  untrusted input: its shape, size and coordinates are checked before it
+  reaches the mesher.
+- **Uploads are bounded** by `MAX_UPLOAD_BYTES`, `MAX_TRACE_BYTES` and a
+  decompression-bomb guard.
 - **Security headers** (CSP, `X-Frame-Options`, `nosniff`, referrer policy) are
-  set on every response, and `robots.txt` keeps crawlers out of `/files/`.
+  set on every response.
 - Want it semi-private? Set `ACCESS_PASSWORD` and `SESSION_SECRET` and the app
   puts a passphrase page in front of everything.
 
@@ -157,10 +174,9 @@ Three things to know about the free plan:
   logos and photos on a plain background all still work.
 - **It sleeps after about 15 minutes idle** and takes roughly a minute to wake.
   The app retries through the wake-up rather than showing an error.
-- **The disk is ephemeral.** A restart wipes every job directory. The browser
-  keeps your source image and settings and rebuilds the job automatically, so
-  you should never hit a dead end, but download links from an earlier session
-  will stop working.
+- **The disk is ephemeral**, which does not matter: the app never writes
+  anything that has to survive. Your source, outline and cutter live in the
+  browser tab, so a restart in the middle of a session loses nothing.
 
 For photo AI and no sleeping, any container or Python host works: Cloud Run,
 Fly.io, Railway, a small VPS. Use the full `requirements.txt` and the
@@ -172,9 +188,8 @@ Fly.io, Railway, a small VPS. Use the full `requirements.txt` and the
 |---|---|---|
 | `OPENAI_API_KEY` | _(unset)_ | Enables text-to-outline generation via the OpenAI Images API. Unset, the "From text" tab is shown as unavailable and the endpoint returns HTTP 402. |
 | `REMBG_ENABLED` | `true` | Background removal for photographic images. Set `false` to fall back to Felzenszwalb graph-cut segmentation, which is faster and less accurate. Turn it off below ~2 GB of RAM; rembg loads a ~170 MB U2Net model at startup. |
-| `PIPELINE_OUTPUT_DIR` | `output` | Where generated job files (PNG, SVG, STL, ZIP) are written. |
-| `JOB_TTL_HOURS` | `24` | Job directories older than this are swept in the background. `0` keeps them forever. |
 | `MAX_UPLOAD_BYTES` | `20971520` | Largest accepted upload (20 MB). |
+| `MAX_TRACE_BYTES` | `4194304` | Largest trace accepted by `/stl/generate` (4 MB). A typical outline is a few KB. |
 | `MAX_TRACE_PIXELS` | `2000000` | Bigger images are downscaled before tracing. Peak memory scales with pixel count, since the extractor works in LAB float64 at 24 bytes per pixel, so a 12 MP phone photo would otherwise peak near 1 GB and OOM a small instance. Outlines are normalised to 0–1 and simplified, so the extra resolution changes nothing in the result. `0` disables. |
 | `ACCESS_PASSWORD` | _(unset)_ | Puts the whole app behind a passphrase login. Leave unset for an open site. |
 | `SESSION_SECRET` | _(unset)_ | Signs login cookies when `ACCESS_PASSWORD` is set. Any long random string; setting it lets sessions survive restarts and replicas. |
