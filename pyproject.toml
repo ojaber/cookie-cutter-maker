@@ -1,0 +1,22 @@
+# Used by the Vercel deploy only (see vercel.json and .vercelignore, which
+# hides the full requirements.txt from it). Same as requirements-render.txt
+# minus uvicorn: Vercel runs the ASGI app itself. Local development, CI and
+# Docker keep using requirements.txt.
+[project]
+name = "cookie-cutter-maker"
+version = "0.2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "pillow",
+    "scikit-image",
+    "shapely",
+    "trimesh",
+    "manifold3d",
+    "mapbox_earcut",
+    "python-dotenv",
+    "openai",
+    "fastapi",
+    "python-multipart",
+    "prometheus-client",
+]

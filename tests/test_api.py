@@ -567,3 +567,16 @@ def test_job_routes_are_gone(client):
     assert client.post("/trace/from-job", data={"job_id": "a" * 32}).status_code in (404, 405)
     assert client.post("/stl/from-job", data={"job_id": "a" * 32}).status_code in (404, 405)
     assert client.get("/files/" + "a" * 32 + "/x.stl").status_code == 404
+
+def test_upload_limit_fits_vercel_and_is_reported(tmp_path, monkeypatch):
+    """Vercel rejects bodies over 4.5 MB before the app runs, so the default
+    limit drops there, and /features tells the page so it can shrink photos."""
+    from fastapi.testclient import TestClient
+
+    mod = _load_app(tmp_path, monkeypatch, VERCEL="1", MAX_UPLOAD_BYTES=None)
+    assert mod.MAX_UPLOAD_BYTES == 4_200_000
+    with TestClient(mod.app) as c:
+        assert c.get("/features").json()["max_upload_bytes"] == 4_200_000
+
+    mod = _load_app(tmp_path, monkeypatch, VERCEL=None, MAX_UPLOAD_BYTES=None)
+    assert mod.MAX_UPLOAD_BYTES == 20 * 1024 * 1024

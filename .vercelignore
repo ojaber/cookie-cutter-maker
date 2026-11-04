@@ -1,0 +1,12 @@
+# Keep the full requirements.txt (with rembg/onnxruntime and pytest) away from
+# Vercel so it installs the slim pyproject.toml list instead.
+requirements.txt
+requirements-render.txt
+tests/
+examples/
+docs/
+.github/
+Dockerfile
+docker-compose.yml
+render.yaml
+Makefile

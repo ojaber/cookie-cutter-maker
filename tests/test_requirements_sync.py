@@ -60,3 +60,18 @@ def test_openai_is_installed_on_render():
     """app/main.py imports OpenAIError unconditionally, so the deploy needs the
     package even when the prompt feature is unused."""
     assert "openai" in _requirements(REPO_ROOT / "requirements-render.txt")
+
+
+def test_vercel_dependencies_match_render_minus_server():
+    """pyproject.toml is the Vercel deploy's dependency list. It must match the
+    Render list except uvicorn, which Vercel does not need."""
+    import re
+
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    block = re.search(r"dependencies = \[(.*?)\]", text, re.S).group(1)
+    vercel = {n.lower() for n in re.findall(r'"([A-Za-z0-9_.-]+)', block)}
+    render = _requirements(REPO_ROOT / "requirements-render.txt")
+    assert vercel == render - {"uvicorn"}, (
+        f"pyproject.toml has drifted from requirements-render.txt: "
+        f"missing {sorted(render - {'uvicorn'} - vercel)}, extra {sorted(vercel - render)}"
+    )

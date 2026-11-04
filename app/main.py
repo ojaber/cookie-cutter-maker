@@ -240,7 +240,13 @@ async def _run(func, *args, **kwargs):
     return await anyio.to_thread.run_sync(functools.partial(func, *args, **kwargs))
 
 # Reject uploads larger than this to avoid disk/memory exhaustion.
-MAX_UPLOAD_BYTES = _env_number("MAX_UPLOAD_BYTES", 20 * 1024 * 1024)
+# Vercel Functions reject request bodies over 4.5 MB before the app sees them,
+# so default lower there (Vercel sets VERCEL=1) and let the page know: it
+# shrinks big photos to fit before uploading. Elsewhere allow 20 MB.
+_ON_VERCEL = bool(os.environ.get("VERCEL"))
+MAX_UPLOAD_BYTES = _env_number(
+    "MAX_UPLOAD_BYTES", 4_200_000 if _ON_VERCEL else 20 * 1024 * 1024
+)
 
 # ── Public-instance guards ─────────────────────────────────────────────────────
 # Tracing and meshing are CPU/memory heavy; on a small public instance a burst
@@ -577,6 +583,7 @@ def features():
     return {
         "background_removal": REMBG_ENABLED,
         "image_generation": bool(os.environ.get("OPENAI_API_KEY")),
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
     }
 
 # ── Stateless request handling ────────────────────────────────────────────────

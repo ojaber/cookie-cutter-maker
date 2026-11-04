@@ -997,9 +997,9 @@ function unlockSteps() {
 }
 
 /* ── Server features ──────────────────────────────────────────────────── */
-let FEATURES = { background_removal: true, image_generation: true };
+let FEATURES = { background_removal: true, image_generation: true, max_upload_bytes: 20 * 1024 * 1024 };
 fetch('/features').then((r) => r.json()).then((f) => {
-  FEATURES = f;
+  FEATURES = { ...FEATURES, ...f };
   if (!f.image_generation) {
     $('tabPrompt').innerHTML = 'From text <span class="lock" aria-hidden="true">🔒</span>';
     $('promptNote').textContent = '';
@@ -1665,6 +1665,58 @@ async function withBusy(btn, fn) {
   }
 }
 
+/* ── Fitting uploads to the server ───────────────────────────────────── */
+// The tracer works at about 2 MP no matter what is uploaded, so a big photo
+// can be shrunk here first with no effect on the outline. That keeps uploads
+// fast and under hosts' request limits (4.5 MB on Vercel).
+const TRACE_PIXELS = 2_000_000;
+const MAX_SOURCE_PIXELS = 24_000_000;   // the server refuses more than this
+const fmtMb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
+
+async function fitImageForUpload(file) {
+  const limit = FEATURES.max_upload_bytes;
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch (e) {
+    return file;   // not decodable here — let the server say what is wrong with it
+  }
+  const pixels = bitmap.width * bitmap.height;
+  if (file.size <= limit && pixels <= MAX_SOURCE_PIXELS) {
+    bitmap.close();
+    return file;
+  }
+  const scale = Math.min(1, Math.sqrt(TRACE_PIXELS / pixels));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  const ctx = canvas.getContext('2d');
+  const toBlob = (type, quality) => new Promise((r) => canvas.toBlob(r, type, quality));
+  const stem = file.name.replace(/\.[^.]*$/, '') || 'image';
+  // Keep PNGs as PNG (transparency can matter to the tracer) when that fits.
+  if (file.type === 'image/png') {
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const png = await toBlob('image/png');
+    if (png && png.size <= limit) {
+      bitmap.close();
+      return new File([png], `${stem}.png`, { type: 'image/png' });
+    }
+  }
+  ctx.fillStyle = '#fff';   // JPEG has no transparency; flatten onto white
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  const jpeg = await toBlob('image/jpeg', 0.92);
+  return jpeg ? new File([jpeg], `${stem}.jpg`, { type: 'image/jpeg' }) : file;
+}
+
+function checkModelSize(file) {
+  const limit = FEATURES.max_upload_bytes;
+  if (file.size > limit) {
+    throw new Error(`That model is ${fmtMb(file.size)}; this server accepts files up to ${fmtMb(limit)}. Try a simplified or decimated export of it.`);
+  }
+}
+
 /* ── Tracing ──────────────────────────────────────────────────────────── */
 const warnHtml = (data) => (data.warning ? `<div class="mini-warn">⚠ ${esc(data.warning)}</div>` : '');
 
@@ -1781,7 +1833,11 @@ async function runStep1(source = null) {
     if (step1Busy) showAlert('alert1', 'info', 'Still working — photos and big models can take a minute or two.');
   }, 12000);
   try {
-    if (source.kind === 'png') showLocalImagePreview(source.file);
+    if (source.kind === 'png') {
+      showLocalImagePreview(source.file);
+      source = { ...source, file: await fitImageForUpload(source.file) };
+    }
+    if (source.kind === 'stl') checkModelSize(source.file);
     setPreviewPlaceholder('svgPreview', 'Tracing…');
     const entry = await traceSource(source, 'alert1');
     setCurrent(entry);
