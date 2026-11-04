@@ -203,7 +203,9 @@ def extract_outline_from_stl(
         geom = proj.geom
         poly = max(geom.geoms, key=lambda g: g.area) if isinstance(geom, MultiPolygon) else geom
         poly = poly.simplify(simplify_epsilon, preserve_topology=True).buffer(0)
-        if poly.is_empty or not poly.is_valid or poly.area < 0.5 * silhouette.area:
+        # Compare outer outlines, not material: a washer or a letter O covers
+        # far less than its filled silhouette but is still exactly right.
+        if poly.is_empty or not poly.is_valid or Polygon(poly.exterior).area < 0.5 * silhouette.area:
             poly = None
     if poly is None:
         poly = silhouette

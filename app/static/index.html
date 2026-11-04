@@ -1898,7 +1898,8 @@ $('btnRun').addEventListener('click', () => withBusy($('btnRun'), async () => {
     // the inputs now describe, so the cutter matches the numbers on screen.
     if (current.source.kind === 'grid') {
       const spec = gridSpecFromInputs();
-      if (spec && !sameGridSpec(spec, current.source.spec)) {
+      if (!spec) throw new Error('Enter valid grid dimensions first (5–300 mm cells, up to 40×40).');
+      if (!sameGridSpec(spec, current.source.spec)) {
         setCurrent(await traceSource({ kind: 'grid', spec }, 'alert3'));
         setPill(3, 'Working…', 'busy');
       }

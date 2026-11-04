@@ -200,3 +200,13 @@ def test_bundled_example_models_trace(tmp_path):
         assert (maxy - miny) / (maxx - minx) == pytest.approx(expected, rel=0.03), name
         # A real silhouette, not the biggest of a few slivers.
         assert result.polygon.area > 0.2, name
+
+
+def test_capped_model_with_a_big_hole_keeps_it(tmp_path):
+    """A washer covers well under half of its filled outline. Its exact face
+    footprint is still right and must win over the hole-filled silhouette."""
+    washer = Polygon([(0, 0), (40, 0), (40, 40), (0, 40)], [[(4, 4), (36, 4), (36, 36), (4, 36)]])
+    assert washer.area < 0.5 * Polygon(washer.exterior).area
+    result = _trace(trimesh.creation.extrude_polygon(washer, 10.0), tmp_path)
+    assert len(result.polygon.interiors) == 1
+    assert result.polygon.area == pytest.approx(washer.area / 40 ** 2, rel=0.05)
