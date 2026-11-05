@@ -64,14 +64,16 @@ def test_openai_is_installed_on_render():
 
 def test_vercel_dependencies_match_render_minus_server():
     """pyproject.toml is the Vercel deploy's dependency list. It must match the
-    Render list except uvicorn, which Vercel does not need."""
+    Render list except uvicorn (Vercel runs the app itself) and openai (left
+    out to keep the bundle small; the text tab reports itself unavailable)."""
     import re
 
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     block = re.search(r"dependencies = \[(.*?)\]", text, re.S).group(1)
     vercel = {n.lower() for n in re.findall(r'"([A-Za-z0-9_.-]+)', block)}
     render = _requirements(REPO_ROOT / "requirements-render.txt")
-    assert vercel == render - {"uvicorn"}, (
+    expected = render - {"uvicorn", "openai"}
+    assert vercel == expected, (
         f"pyproject.toml has drifted from requirements-render.txt: "
-        f"missing {sorted(render - {'uvicorn'} - vercel)}, extra {sorted(vercel - render)}"
+        f"missing {sorted(expected - vercel)}, extra {sorted(vercel - expected)}"
     )

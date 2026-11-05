@@ -4,6 +4,7 @@ import contextlib
 import functools
 import hashlib
 import hmac
+import importlib.util
 import os
 import re
 import io
@@ -615,7 +616,9 @@ def features():
     from cutter_pipeline.image_extractor import REMBG_ENABLED
     return {
         "background_removal": REMBG_ENABLED,
-        "image_generation": bool(os.environ.get("OPENAI_API_KEY")),
+        # Needs the key and the package: the Vercel deploy leaves openai out.
+        "image_generation": bool(os.environ.get("OPENAI_API_KEY"))
+        and importlib.util.find_spec("openai") is not None,
         "max_upload_bytes": MAX_UPLOAD_BYTES,
     }
 

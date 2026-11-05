@@ -1,7 +1,10 @@
 # Used by the Vercel deploy only (see vercel.json and .vercelignore, which
 # hides the full requirements.txt from it). Same as requirements-render.txt
-# minus uvicorn: Vercel runs the ASGI app itself. Local development, CI and
-# Docker keep using requirements.txt.
+# minus uvicorn (Vercel runs the ASGI app itself) and openai (29 MB, only for
+# the "From text" tab; without it that tab shows as unavailable). Keeping the
+# bundle small matters: over Vercel's standard size, every new instance
+# unpacks its dependencies at start. Local development, CI and Docker keep
+# using requirements.txt.
 [project]
 name = "cookie-cutter-maker"
 version = "0.2.0"
@@ -15,7 +18,6 @@ dependencies = [
     "manifold3d",
     "mapbox_earcut",
     "python-dotenv",
-    "openai",
     "fastapi",
     "python-multipart",
     "prometheus-client",

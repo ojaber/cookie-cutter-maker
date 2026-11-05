@@ -597,3 +597,14 @@ def test_pipeline_imports_wait_for_the_import_lock(client):
         assert not done.wait(0.3), "an entry point imported without waiting for the lock"
     assert done.wait(5)
     assert mod._pipeline_loaded
+
+
+def test_text_tab_needs_the_openai_package_too(client, monkeypatch):
+    """The Vercel deploy leaves openai out to stay small. A key set there must
+    not make the page offer a feature that would then fail."""
+    import importlib.util
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "openai" else real(name, *a))
+    assert client.get("/features").json()["image_generation"] is False
