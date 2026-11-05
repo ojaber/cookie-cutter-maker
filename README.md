@@ -178,6 +178,25 @@ Three things to know about the free plan:
   anything that has to survive. Your source, outline and cutter live in the
   browser tab, so a restart in the middle of a session loses nothing.
 
+### Vercel
+
+The repo also deploys to [Vercel](https://vercel.com) as a single Python
+function. Import the repo in Vercel; `vercel.json`, `pyproject.toml` and
+`.vercelignore` do the rest. Set `REMBG_ENABLED=false` in the project's
+environment variables, since photo background removal does not fit in the bundle.
+
+Things that differ from Render:
+
+- **No sleeping.** A new instance takes seconds to start, not a minute, but it
+  can take 15–30 s when a burst of traffic starts several at once, because the
+  dependencies are over Vercel's standard bundle size and are unpacked at start.
+- **4.5 MB per request.** The app lowers its upload limit to 4.2 MB there. The
+  page shrinks larger photos to the ~2 MP the tracer uses before uploading, so
+  photos still work; STL models over the limit are refused with a clear message.
+- **The abuse guards are per instance.** `RATE_LIMIT_PER_MINUTE` and
+  `HEAVY_CONCURRENCY` are in-memory, and Vercel runs as many instances as
+  traffic needs, so use Vercel's firewall rate limiting for a real cap.
+
 For photo AI and no sleeping, any container or Python host works: Cloud Run,
 Fly.io, Railway, a small VPS. Use the full `requirements.txt` and the
 `Dockerfile` there.

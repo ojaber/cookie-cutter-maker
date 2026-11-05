@@ -11,6 +11,7 @@ import secrets
 import sys
 import json
 import tempfile
+import threading
 import logging
 import time
 from collections import deque
@@ -48,39 +49,73 @@ _log = logging.getLogger(__name__)
 # python caches it in sys.modules, so the cost is paid once — and
 # _warm_imports() preloads them in the background once the server is listening.
 # Call sites stay unchanged.
+#
+# Every entry point goes through _load_pipeline(), which imports the stack once
+# under a lock. Without it the warmup thread and the first request import
+# numpy at the same moment on a fresh instance, and numpy fails when two
+# threads initialise it together ("partially initialized module"). Render's
+# long-lived server rarely hit that; Vercel starts a new instance per burst and
+# hit it on the first request.
+
+_PIPELINE_LOCK = threading.Lock()
+_pipeline_loaded = False
+
+
+def _load_pipeline() -> None:
+    global _pipeline_loaded
+    if _pipeline_loaded:
+        return
+    with _PIPELINE_LOCK:
+        if _pipeline_loaded:
+            return
+        import cutter_pipeline.trace_outline  # noqa: F401
+        import cutter_pipeline.stl_dispatch  # noqa: F401
+        import cutter_pipeline.stl_extractor  # noqa: F401
+        import cutter_pipeline.grid_spec  # noqa: F401
+        import cutter_pipeline.trace_meta  # noqa: F401
+        import cutter_pipeline.image_extractor  # noqa: F401
+        import trimesh  # noqa: F401
+        _pipeline_loaded = True
 
 
 def trace_png_to_polygon(*args, **kwargs):
+    _load_pipeline()
     from cutter_pipeline.trace_outline import trace_png_to_polygon as _f
     return _f(*args, **kwargs)
 
 
 def build_grid_trace(*args, **kwargs):
+    _load_pipeline()
     from cutter_pipeline.grid_spec import build_grid_trace as _f
     return _f(*args, **kwargs)
 
 
 def grid_size_mm(*args, **kwargs):
+    _load_pipeline()
     from cutter_pipeline.grid_spec import grid_size_mm as _f
     return _f(*args, **kwargs)
 
 
 def generate_stl_from_trace(*args, **kwargs):
+    _load_pipeline()
     from cutter_pipeline.stl_dispatch import generate_stl_from_trace as _f
     return _f(*args, **kwargs)
 
 
 def trace_result_to_dict(*args, **kwargs):
+    _load_pipeline()
     from cutter_pipeline.trace_meta import trace_result_to_dict as _f
     return _f(*args, **kwargs)
 
 
 def trace_result_from_payload(*args, **kwargs):
+    _load_pipeline()
     from cutter_pipeline.trace_meta import trace_result_from_payload as _f
     return _f(*args, **kwargs)
 
 
 def extract_outline_from_stl(*args, **kwargs):
+    _load_pipeline()
     from cutter_pipeline.stl_extractor import extract_outline_from_stl as _f
     return _f(*args, **kwargs)
 
@@ -112,12 +147,7 @@ def _warm_imports() -> None:
     connections, so it never delays startup."""
     started = time.perf_counter()
     try:
-        import cutter_pipeline.trace_outline  # noqa: F401
-        import cutter_pipeline.stl_dispatch  # noqa: F401
-        import cutter_pipeline.stl_extractor  # noqa: F401
-        import cutter_pipeline.grid_spec  # noqa: F401
-        import cutter_pipeline.trace_meta  # noqa: F401
-        import trimesh  # noqa: F401
+        _load_pipeline()
     except Exception:
         # Not fatal: whichever import failed will be retried on first use and
         # surface a real error to that request.
@@ -359,6 +389,7 @@ def _verify_image_bytes(content: bytes) -> None:
 
 def _verify_stl_bytes(content: bytes) -> None:
     """Confirm the upload is a valid STL file before we run the pipeline on it."""
+    _load_pipeline()
     import trimesh
     try:
         import tempfile
@@ -377,6 +408,7 @@ def _verify_stl_bytes(content: bytes) -> None:
 
 
 def _measure_stl_xy_mm(stl_path: Path) -> tuple[float, float]:
+    _load_pipeline()
     import trimesh
 
     mesh = trimesh.load(str(stl_path), force="mesh")
@@ -579,6 +611,7 @@ def robots():
 
 @app.get("/features", include_in_schema=False)
 def features():
+    _load_pipeline()
     from cutter_pipeline.image_extractor import REMBG_ENABLED
     return {
         "background_removal": REMBG_ENABLED,

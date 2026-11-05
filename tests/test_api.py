@@ -580,3 +580,20 @@ def test_upload_limit_fits_vercel_and_is_reported(tmp_path, monkeypatch):
 
     mod = _load_app(tmp_path, monkeypatch, VERCEL=None, MAX_UPLOAD_BYTES=None)
     assert mod.MAX_UPLOAD_BYTES == 20 * 1024 * 1024
+
+
+def test_pipeline_imports_wait_for_the_import_lock(client):
+    """The warmup thread and the first request must not import numpy at the
+    same time (it fails on a fresh Vercel instance). Every entry point waits
+    for the one-time import under a lock."""
+    import threading
+
+    mod = client.app_module
+    mod._pipeline_loaded = False
+    done = threading.Event()
+    with mod._PIPELINE_LOCK:
+        t = threading.Thread(target=lambda: (mod.grid_size_mm({"cols": 1, "rows": 1, "cell_w_mm": 5, "cell_h_mm": 5}), done.set()))
+        t.start()
+        assert not done.wait(0.3), "an entry point imported without waiting for the lock"
+    assert done.wait(5)
+    assert mod._pipeline_loaded
